@@ -1,0 +1,146 @@
+parts:
+  - id: front-lip
+    name: "Irmscher Facelift Front Lip Spoiler"
+    part_numbers:
+      - "i 34 01 009"
+      - "i3401009"
+      - "3401009"
+    aliases:
+      en: ["front lip", "front spoiler", "front lip spoiler", "front bumper lip"]
+      de: ["Frontspoiler", "Frontlippe", "Frontspoilerlippe", "Spoilerlippe vorne"]
+      pl: ["spoiler przedni", "dokładka przedniego zderzaka", "lip przedni"]
+    compatible_models: ["Signum", "Vectra C"]
+    notes: "Facelift model only (2005+)"
+
+  - id: grille
+    name: "Irmscher Facelift Radiator Grille"
+    part_numbers:
+      - "i 34 01 059"
+      - "i3401059"
+      - "3401059"
+    aliases:
+      en: ["radiator grille", "front grille", "grille"]
+      de: ["Kühlergrill", "Frontgrill", "Grill"]
+      pl: ["grill", "atrapa chłodnicy", "grill przedni"]
+    compatible_models: ["Signum", "Vectra C"]
+    notes: "Facelift model only (2005+)"
+
+  - id: stainless-grille
+    name: "Irmscher Stainless Steel Strip Grille"
+    part_numbers:
+      - "i 34 01 060"
+      - "i3401060"
+      - "3401060"
+    aliases:
+      en: ["stainless grille", "chrome grille", "stainless steel grille", "steel strip grille"]
+      de: ["Edelstahl Kühlergrill", "Chrom Grill", "Edelstahlleisten Grill"]
+      pl: ["grill stalowy", "grill chromowany", "grill ze stali nierdzewnej"]
+    compatible_models: ["Signum", "Vectra C"]
+    notes: "Facelift model only (2005+)"
+
+  - id: side-skirts
+    name: "Irmscher Signum Side Skirts"
+    part_numbers:
+      - "i 34 01 311"
+      - "i3401311"
+      - "3401311"
+    aliases:
+      en: ["side skirts", "side sills", "rocker panels"]
+      de: ["Seitenschweller", "Schwellerleisten", "Seitenleisten"]
+      pl: ["progi boczne", "nakładki progowe", "listwy boczne"]
+    compatible_models: ["Signum"]
+    notes: "Signum specific fitment"
+
+  - id: roof-spoiler
+    name: "Irmscher Signum Roof Spoiler"
+    part_numbers:
+      - "i 34 01 404"
+      - "i3401404"
+      - "3401404"
+    aliases:
+      en: ["roof spoiler", "rear roof spoiler", "tailgate spoiler"]
+      de: ["Dachspoiler", "Heckspoiler Dach", "Dachkantenspoiler"]
+      pl: ["spoiler dachowy", "lotka dachowa", "spojler na dach"]
+    compatible_models: ["Signum"]
+    notes: "Signum specific fitment"
+
+  - id: rear-lip-left
+    name: "Irmscher Rear Lip (Left Exit Exhaust)"
+    part_numbers:
+      - "i 34 01 455"
+      - "i3401455"
+      - "3401455"
+    aliases:
+      en: ["rear lip", "rear bumper lip", "rear diffuser", "rear spoiler lip"]
+      de: ["Heckansatz", "Hecklippe", "Heckspoilerlippe", "Heckdiffusor"]
+      pl: ["dokładka tylna", "lip tylny", "spoiler tylny dolny"]
+    compatible_models: ["Signum"]
+    notes: "Left-side exhaust exit variant"
+
+  - id: rear-lip-dual
+    name: "Irmscher Rear Lip (Left/Right Exhaust)"
+    part_numbers:
+      - "i 34 01 456"
+      - "i3401456"
+      - "3401456"
+    aliases:
+      en: ["rear lip dual", "rear bumper lip dual exhaust", "rear diffuser dual"]
+      de: ["Heckansatz Doppelrohr", "Hecklippe Doppelrohr", "Heckdiffusor beidseitig"]
+      pl: ["dokładka tylna podwójna", "lip tylny podwójny"]
+    compatible_models: ["Signum"]
+    notes: "Dual exhaust exit variant"
+
+  - id: exhaust-left
+    name: "Irmscher Z19DT Left Exit Sport Exhaust"
+    part_numbers:
+      - "i 34 08 017"
+      - "i3408017"
+      - "3408017"
+    aliases:
+      en: ["sport exhaust", "exhaust system", "stainless exhaust"]
+      de: ["Sportauspuff", "Auspuffanlage", "Edelstahlauspuff"]
+      pl: ["wydech sportowy", "układ wydechowy", "wydech nierdzewny"]
+    compatible_models: ["Signum", "Vectra C"]
+    notes: "For Z19DT 1.9 CDTI 120HP engine, left exit"
+
+  - id: exhaust-quad
+    name: "Irmscher Z19DT Quad Exit Sport Exhaust"
+    part_numbers:
+      - "i 34 08 131"
+      - "i3408131"
+      - "3408131"
+    aliases:
+      en: ["quad exhaust", "four tip exhaust", "quad pipe exhaust"]
+      de: ["Vierfach Auspuff", "Doppelrohr Auspuff", "4-Rohr Auspuff"]
+      pl: ["wydech poczwórny", "wydech cztery końcówki"]
+    compatible_models: ["Signum", "Vectra C"]
+    notes: "For Z19DT 1.9 CDTI 120HP engine, quad tips"
+
+negative_rules:
+  excluded_part_numbers:
+    - "i 34 01 002"
+    - "i3401002"
+    - "3401002"
+  excluded_keywords:
+    - "pre-facelift"
+    - "pre facelift"
+    - "prefacelift"
+    - "Astra"
+    - "Astra-only"
+    - "Irmscher style"
+    - "Irmscher-style"
+    - "replica"
+    - "Replica"
+    - "aftermarket copy"
+    - "nicht original"
+    - "replika"
+    - "kopia"
+    - "styl Irmscher"
+  incompatible_models:
+    - "Astra"
+    - "Corsa"
+    - "Meriva"
+    - "Zafira"
+    - "Tigra"
+    - "Mokka"
+    - "Insignia"
