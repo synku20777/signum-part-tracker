@@ -71,3 +71,16 @@ async def test_title_change_creates_snapshot(db_session, sample_listing):
     assert is_new is False
     assert has_changes is True
     assert prev_price == sample_listing.price
+
+
+@pytest.mark.asyncio
+async def test_missing_price_is_preserved_in_snapshot(db_session, sample_listing):
+    sample_listing.price = None
+    dedup = Deduplicator(ListingRepository(), SnapshotRepository())
+    row, is_new, _, previous_price, _ = await dedup.process(db_session, sample_listing)
+    snapshot = await SnapshotRepository().get_latest(db_session, row.id)
+    assert is_new is True
+    assert previous_price is None
+    assert row.price is None
+    assert snapshot is not None
+    assert snapshot.price is None

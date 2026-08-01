@@ -71,7 +71,11 @@ class TelegramNotifier:
         ]
 
         # Price info
-        price_line = f"\U0001f4b6 Price: {payload.price} {payload.currency}"
+        price_line = (
+            f"\U0001f4b6 Price: {payload.price} {payload.currency}"
+            if payload.price is not None
+            else "\U0001f4b6 Price unavailable"
+        )
         if payload.previous_price is not None:
             price_line += f" (was {payload.previous_price} {payload.currency})"
         lines.append(price_line)

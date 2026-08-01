@@ -258,3 +258,29 @@ def test_algorithm_version(matcher):
     result = matcher.match(listing)
     assert result is not None
     assert result.algorithm_version == ALGORITHM_VERSION
+
+
+def test_generic_vehicle_evidence_does_not_identify_a_part(matcher):
+    listing = NormalizedListing(
+        source=Source.SSCOM,
+        external_id="sscom:donor",
+        title="Opel Signum breaking for parts by Irmscher",
+        description="All parts available",
+        url="http",
+        price=None,
+    )
+    result = matcher.match(listing)
+    assert result is not None
+    assert result.has_part_specific_evidence is False
+
+
+def test_tied_part_aliases_are_not_assigned_arbitrarily(matcher):
+    listing = NormalizedListing(
+        source=Source.SSCOM,
+        external_id="sscom:ambiguous",
+        title="Opel Signum rear lip dual",
+        description="",
+        url="http",
+        price=None,
+    )
+    assert matcher.match(listing) is None

@@ -201,6 +201,15 @@ wheels = [
 ]
 
 [[package]]
+name = "defusedxml"
+version = "0.7.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0f/d5/c66da9b79e5bdb124974bfe172b4daf3c984ebd9c2a06e2b8a4dc7331c72/defusedxml-0.7.1.tar.gz", hash = "sha256:1bb3032db185915b62d7c6209c5a8792be6a32ab2fedacc84e01b52c51aa3e69", size = 75520, upload-time = "2021-03-08T10:59:26.269Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/6c/aa3f2f849e01cb6a001cd8554a88d4c77c5c1a31c95bdf1cf9301e6d9ef4/defusedxml-0.7.1-py2.py3-none-any.whl", hash = "sha256:a352e7e428770286cc899e2542b6cdaedb2b4953ff269a210103ec58f6198a61", size = 25604, upload-time = "2021-03-08T10:59:24.45Z" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.140.13"
 source = { registry = "https://pypi.org/simple" }
@@ -381,6 +390,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
     { name = "alembic" },
+    { name = "defusedxml" },
     { name = "fastapi" },
     { name = "httpx" },
     { name = "pydantic" },
@@ -390,6 +400,7 @@ dependencies = [
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "tenacity" },
     { name = "typer" },
+    { name = "tzdata" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -401,13 +412,13 @@ dev = [
     { name = "pytest-cov" },
     { name = "respx" },
     { name = "ruff" },
-    { name = "types-pyyaml" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20" },
     { name = "alembic", specifier = ">=1.13" },
+    { name = "defusedxml", specifier = ">=0.7.1" },
     { name = "fastapi", specifier = ">=0.111" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "pydantic", specifier = ">=2.7" },
@@ -417,6 +428,7 @@ requires-dist = [
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
     { name = "tenacity", specifier = ">=8.3" },
     { name = "typer", specifier = ">=0.12" },
+    { name = "tzdata", specifier = ">=2025.2" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
 
@@ -428,7 +440,6 @@ dev = [
     { name = "pytest-cov", specifier = ">=5.0" },
     { name = "respx", specifier = ">=0.21" },
     { name = "ruff", specifier = ">=0.4" },
-    { name = "types-pyyaml", specifier = ">=6.0" },
 ]
 
 [[package]]
@@ -1024,15 +1035,6 @@ wheels = [
 ]
 
 [[package]]
-name = "types-pyyaml"
-version = "6.0.12.20260724"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/3f/6f/a28f44bcd56bebed42b028a2894c79853e2f5e6b5279e633cb3f287a05e7/types_pyyaml-6.0.12.20260724.tar.gz", hash = "sha256:3c1ce1bb73cd5ec02e90390c2b1f00e810d241d8825fd73ff359696839271b6b", size = 17893, upload-time = "2026-07-24T04:58:43.453Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/8b/42/0337fefc615e20ee55d1c8f71b774a9b2b734a04669139c20753b27a2a3a/types_pyyaml-6.0.12.20260724-py3-none-any.whl", hash = "sha256:d57db930a4b2efbc57cf430ec8882765d246929432fa253092f383902329a453", size = 20312, upload-time = "2026-07-24T04:58:42.486Z" },
-]
-
-[[package]]
 name = "typing-extensions"
 version = "4.16.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1051,6 +1053,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/55/e3/70399cb7dd41c10ac53367ae42139cf4b1ca5f36bb3dc6c9d33acdb43655/typing_inspection-0.4.2.tar.gz", hash = "sha256:ba561c48a67c5958007083d386c3295464928b01faa735ab8547c5692e87f464", size = 75949, upload-time = "2025-10-01T02:14:41.687Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/dc/9b/47798a6c91d8bdb567fe2698fe81e0c6b7cb7ef4d13da4114b41d239f65d/typing_inspection-0.4.2-py3-none-any.whl", hash = "sha256:4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7", size = 14611, upload-time = "2025-10-01T02:14:40.154Z" },
+]
+
+[[package]]
+name = "tzdata"
+version = "2026.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/92/ff/5a28bdfd8c3ebec42564ac7d0e54ca3db65044a9314a97f9564fa7a1e926/tzdata-2026.3.tar.gz", hash = "sha256:4a1518b8993086a7982523e071643f3c0e5f213e75b21318e78bcabfff9d1415", size = 198674, upload-time = "2026-07-10T08:50:37.887Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e5/6d/b53b99a9f2766d095985947a5782f1702cabb129a34f7a802d7197af832f/tzdata-2026.3-py2.py3-none-any.whl", hash = "sha256:dc096730c87af6cab1b171c9d532be840741ff5d459015e7f6947bd7d7e54931", size = 348168, upload-time = "2026-07-10T08:50:36.46Z" },
 ]
 
 [[package]]

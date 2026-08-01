@@ -4,11 +4,11 @@ Revision ID: 6a26ec39bb13
 Revises: 001
 """
 
-from collections.abc import Sequence
-from decimal import Decimal
 import hashlib
 import json
 import re
+from collections.abc import Sequence
+from decimal import Decimal
 
 import sqlalchemy as sa
 from alembic import op

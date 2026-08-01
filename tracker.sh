@@ -80,8 +80,8 @@ case "$command" in
         ;;
     scan-source)
         source="${2:-ebay}"
-        [[ "$source" == ebay ]] || { echo "Only ebay is implemented" >&2; exit 2; }
-        docker compose exec "$SERVICE" tracker trigger-scan ebay
+        [[ "$source" == ebay || "$source" == sscom ]] || { echo "Source must be ebay or sscom" >&2; exit 2; }
+        docker compose exec "$SERVICE" tracker trigger-scan "$source" --wait
         ;;
     doctor)
         docker compose exec "$SERVICE" tracker doctor

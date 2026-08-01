@@ -17,8 +17,11 @@ def settings():
     return Settings(
         api_token="test-api-token-test-api-token-123456",
         database_url="sqlite+aiosqlite:///:memory:",
+        ebay_enabled=True,
         ebay_client_id="dummy_id",
         ebay_client_secret="dummy_secret",
+        sscom_enabled=False,
+        telegram_enabled=True,
         telegram_bot_token="dummy_token",
         telegram_chat_id="dummy_chat",
         minimum_match_score=50,

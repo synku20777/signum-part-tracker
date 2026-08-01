@@ -58,13 +58,21 @@ class PartMatcher:
         return self._config.negative_rules
 
     def match(self, listing: NormalizedListing) -> MatchResult | None:
-        """Score a listing against all parts. Returns the best match or None."""
-        best: MatchResult | None = None
+        """Score a listing and refuse ambiguous part assignments."""
+        results: list[MatchResult] = []
         for part in self._config.parts:
             result = self._score_against_part(listing, part)
-            if result is not None and (best is None or result.total_score > best.total_score):
-                best = result
-        return best
+            if result is not None:
+                results.append(result)
+        if not results:
+            return None
+
+        eligible = [result for result in results if result.has_part_specific_evidence]
+        if not eligible:
+            return max(results, key=lambda result: result.total_score)
+        highest = max(result.total_score for result in eligible)
+        winners = [result for result in eligible if result.total_score == highest]
+        return winners[0] if len(winners) == 1 else None
 
     def _score_against_part(
         self, listing: NormalizedListing, part: PartDefinition
@@ -220,6 +228,7 @@ class PartMatcher:
         has_exact = any(
             r.rule in ("exact_part_number_title", "exact_part_number_description") for r in reasons
         )
+        has_alias = any(r.rule == "part_name_alias" for r in reasons)
         has_incompatible = any(
             r.rule in ("incompatible_model", "replica_keyword") for r in reasons
         )
@@ -244,6 +253,7 @@ class PartMatcher:
             total_score=total,
             compatibility_status=compatibility_status,
             reasons=reasons,
+            has_part_specific_evidence=has_exact or has_alias,
             algorithm_version=ALGORITHM_VERSION,
         )
 

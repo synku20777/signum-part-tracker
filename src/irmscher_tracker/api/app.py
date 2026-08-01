@@ -4,9 +4,9 @@ import asyncio
 import json
 import logging
 import secrets
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Annotated, Literal, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -20,7 +20,7 @@ from irmscher_tracker.api.schemas import (
     HealthResponse,
     ListingResponse,
     MatchResponse,
-    RunTriggerResponse,
+    RunAcceptedResponse,
     SearchRunResponse,
 )
 from irmscher_tracker.db.engine import get_session_factory
@@ -30,6 +30,7 @@ from irmscher_tracker.db.repositories import (
     MatchRepository,
     SearchRunRepository,
 )
+from irmscher_tracker.domain import ListingCondition, NormalizedListing, Source
 from irmscher_tracker.matcher import PartMatcher
 from irmscher_tracker.notifications.telegram import TelegramNotifier
 from irmscher_tracker.services.alert import AlertService
@@ -39,7 +40,9 @@ from irmscher_tracker.services.search import (
     SourceRunCoordinator,
 )
 from irmscher_tracker.settings import Settings, get_settings
+from irmscher_tracker.sources.base import SourceAdapter
 from irmscher_tracker.sources.ebay import EbayAdapter
+from irmscher_tracker.sources.sscom import SscomAdapter, load_feed_urls
 
 logger = logging.getLogger(__name__)
 security = HTTPBearer()
@@ -50,30 +53,13 @@ class RuntimeState:
     settings: Settings
     session_factory: async_sessionmaker[AsyncSession]
     coordinator: SourceRunCoordinator
-    scheduler_task: asyncio.Task[None] | None = None
+    scheduler_tasks: dict[Source, asyncio.Task[None]] = field(default_factory=dict)
+    manual_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
 
 
-async def _run_ebay(runtime: RuntimeState) -> RunTriggerResponse:
+def _search_service(runtime: RuntimeState, notifier: TelegramNotifier | None) -> SearchService:
     settings = runtime.settings
-    client_secret = settings.ebay_client_secret.get_secret_value()
-    if not settings.ebay_enabled:
-        raise ValueError("eBay scanning is disabled")
-    if not settings.ebay_client_id or not client_secret:
-        raise ValueError("eBay credentials not configured")
-
-    bot_token = settings.telegram_bot_token.get_secret_value()
-    notifier: TelegramNotifier | None = None
-    if settings.telegram_enabled and bot_token and settings.telegram_chat_id:
-        notifier = TelegramNotifier(bot_token, settings.telegram_chat_id)
-
-    adapter = EbayAdapter(
-        client_id=settings.ebay_client_id,
-        client_secret=client_secret,
-        marketplace_id=settings.ebay_marketplace_id,
-        timeout=settings.ebay_api_timeout,
-        max_results_per_query=settings.ebay_max_results_per_query,
-    )
-    service = SearchService(
+    return SearchService(
         session_factory=runtime.session_factory,
         matcher=PartMatcher(settings.parts_config_path),
         alert_service=AlertService(notifier),
@@ -82,38 +68,149 @@ async def _run_ebay(runtime: RuntimeState) -> RunTriggerResponse:
         price_change_percent=settings.price_drop_percent,
         max_consecutive_misses=settings.max_consecutive_misses,
     )
+
+
+def _notifier(settings: Settings) -> TelegramNotifier | None:
+    token = settings.telegram_bot_token.get_secret_value()
+    if settings.telegram_enabled and token and settings.telegram_chat_id:
+        return TelegramNotifier(token, settings.telegram_chat_id)
+    return None
+
+
+def _source_enabled(settings: Settings, source: Source) -> bool:
+    return (source is Source.EBAY and settings.ebay_enabled) or (
+        source is Source.SSCOM and settings.sscom_enabled
+    )
+
+
+def _source_configured(settings: Settings, source: Source) -> bool:
+    if source is Source.EBAY:
+        return bool(settings.ebay_client_id and settings.ebay_client_secret.get_secret_value())
+    if source is Source.SSCOM:
+        try:
+            return bool(load_feed_urls(settings.sources_config_path))
+        except (OSError, ValueError):
+            return False
+    return False
+
+
+async def _known_sscom_listings(runtime: RuntimeState) -> dict[str, NormalizedListing]:
+    async with runtime.session_factory() as session:
+        rows = await ListingRepository().list_by_source(session, Source.SSCOM.value)
+    known: dict[str, NormalizedListing] = {}
+    for row in rows:
+        try:
+            metadata = json.loads(row.source_metadata_json or "{}")
+        except json.JSONDecodeError:
+            metadata = {"schema_version": 1}
+        try:
+            condition = ListingCondition(row.condition)
+        except ValueError:
+            condition = ListingCondition.UNKNOWN
+        try:
+            images = json.loads(row.image_urls_json or "[]")
+        except json.JSONDecodeError:
+            images = []
+        known[row.external_id] = NormalizedListing(
+            source=Source.SSCOM,
+            external_id=row.external_id,
+            title=row.title,
+            description=row.description,
+            url=row.url,
+            image_urls=images,
+            price=row.price,
+            currency=row.currency,
+            shipping_cost=row.shipping_cost,
+            condition=condition,
+            seller=row.seller,
+            seller_location=row.seller_location,
+            published_at=row.published_at,
+            source_metadata=metadata,
+            rss_fingerprint_seen=row.rss_fingerprint_seen,
+            rss_fingerprint_enriched=row.rss_fingerprint_enriched,
+            last_detail_success_at=row.last_detail_success_at,
+            detail_status=row.detail_status,
+            raw_data=metadata.copy(),
+        )
+    return known
+
+
+async def _create_ebay_adapter(runtime: RuntimeState) -> SourceAdapter:
+    settings = runtime.settings
+    return EbayAdapter(
+        client_id=settings.ebay_client_id,
+        client_secret=settings.ebay_client_secret.get_secret_value(),
+        marketplace_id=settings.ebay_marketplace_id,
+        timeout=settings.ebay_api_timeout,
+        max_results_per_query=settings.ebay_max_results_per_query,
+    )
+
+
+async def _create_sscom_adapter(runtime: RuntimeState) -> SourceAdapter:
+    settings = runtime.settings
+    return SscomAdapter(
+        feed_urls=load_feed_urls(settings.sources_config_path),
+        known_listings=await _known_sscom_listings(runtime),
+        timeout=settings.sscom_request_timeout,
+        max_detail_requests=settings.sscom_max_detail_requests_per_run,
+        detail_refresh_hours=settings.sscom_detail_refresh_hours,
+    )
+
+
+ADAPTER_FACTORIES: dict[Source, Callable[[RuntimeState], Awaitable[SourceAdapter]]] = {
+    Source.EBAY: _create_ebay_adapter,
+    Source.SSCOM: _create_sscom_adapter,
+}
+
+
+async def _build_adapter(runtime: RuntimeState, source: Source) -> SourceAdapter:
+    factory = ADAPTER_FACTORIES.get(source)
+    if factory is None:
+        raise ValueError(f"Source {source.value} is not implemented")
+    return await factory(runtime)
+
+
+async def _run_prepared(
+    adapter: SourceAdapter,
+    service: SearchService,
+    notifier: TelegramNotifier | None,
+    run_id: int,
+) -> None:
     try:
-        result = await service.run(adapter)
+        await service.run_reserved(adapter, run_id)
     finally:
         await adapter.close()
         if notifier is not None:
             await notifier.close()
 
-    assert result.run_id is not None
-    return RunTriggerResponse(
-        search_run_id=result.run_id,
-        status=result.status.value,
-        message=f"eBay search {result.status.value} with {result.total_found} listings",
-        total_found=result.total_found,
-        new_listings=result.new_listings,
-        matches_found=result.matches_found,
-        alerts_sent=result.alerts_sent,
-    )
+
+async def _run_source(runtime: RuntimeState, source: Source) -> None:
+    notifier = _notifier(runtime.settings)
+    adapter: SourceAdapter | None = None
+    try:
+        adapter = await _build_adapter(runtime, source)
+        service = _search_service(runtime, notifier)
+        await service.run(adapter)
+    finally:
+        if adapter is not None:
+            await adapter.close()
+        if notifier is not None:
+            await notifier.close()
 
 
-async def _scheduler_loop(runtime: RuntimeState) -> None:
+async def _scheduler_loop(runtime: RuntimeState, source: Source, interval: int) -> None:
     async def run_once() -> None:
         try:
-            await _run_ebay(runtime)
+            await _run_source(runtime, source)
         except SourceBusyError as exc:
-            logger.info("Skipping scheduled eBay scan; run %d is active", exc.run_id)
+            logger.info("Skipping scheduled %s scan; run %d is active", source.value, exc.run_id)
         except Exception:
-            logger.exception("Scheduled eBay run failed")
+            logger.exception("Scheduled %s run failed", source.value)
 
     if runtime.settings.scan_on_startup:
         await run_once()
     while True:
-        await asyncio.sleep(runtime.settings.search_interval_minutes * 60)
+        await asyncio.sleep(interval * 60)
         await run_once()
 
 
@@ -135,13 +232,24 @@ def create_app(
             await SearchRunRepository().interrupt_stale(session)
             await session.commit()
 
-        runtime.scheduler_task = asyncio.create_task(_scheduler_loop(runtime))
+        intervals = {
+            Source.EBAY: settings.search_interval_minutes,
+            Source.SSCOM: settings.sscom_interval_minutes,
+        }
+        for source, interval in intervals.items():
+            if _source_enabled(settings, source) and _source_configured(settings, source):
+                runtime.scheduler_tasks[source] = asyncio.create_task(
+                    _scheduler_loop(runtime, source, interval)
+                )
         try:
             yield
         finally:
-            runtime.scheduler_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await runtime.scheduler_task
+            tasks = [*runtime.scheduler_tasks.values(), *runtime.manual_tasks.values()]
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with suppress(asyncio.CancelledError):
+                    await task
 
     app = FastAPI(
         title="Irmscher Parts Tracker",
@@ -167,7 +275,7 @@ def create_app(
         return JSONResponse(
             status_code=409,
             content={
-                "detail": "An eBay scan is already running.",
+                "detail": f"An {exc.source.value} scan is already running.",
                 "search_run_id": exc.run_id,
             },
         )
@@ -183,9 +291,10 @@ def create_app(
             logger.exception("Database health check failed")
             database = "error"
 
-        task = current.scheduler_task
         scheduler: Literal["running", "stopped"] = (
-            "running" if task is not None and not task.done() else "stopped"
+            "running"
+            if all(not task.done() for task in current.scheduler_tasks.values())
+            else "stopped"
         )
         status: Literal["ok", "degraded"] = (
             "ok" if database == "ok" and scheduler == "running" else "degraded"
@@ -198,11 +307,8 @@ def create_app(
             version=__version__,
             database=database,
             scheduler=scheduler,
-            ebay_configured=bool(
-                settings.ebay_enabled
-                and settings.ebay_client_id
-                and settings.ebay_client_secret.get_secret_value()
-            ),
+            ebay_configured=_source_configured(settings, Source.EBAY),
+            sscom_configured=_source_configured(settings, Source.SSCOM),
             telegram_configured=bool(
                 settings.telegram_enabled
                 and settings.telegram_bot_token.get_secret_value()
@@ -266,16 +372,52 @@ def create_app(
             rows = await SearchRunRepository().list_runs(session, limit=limit, offset=offset)
             return [_run_to_response(row) for row in rows]
 
+    @app.get("/search-runs/{run_id}", response_model=SearchRunResponse)
+    async def get_search_run(request: Request, run_id: int) -> SearchRunResponse:
+        async with runtime(request).session_factory() as session:
+            row = await SearchRunRepository().get_by_id(session, run_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="Search run not found")
+            return _run_to_response(row)
+
     @app.post(
-        "/runs/ebay",
-        response_model=RunTriggerResponse,
+        "/runs/{source}",
+        response_model=RunAcceptedResponse,
+        status_code=202,
         dependencies=[Depends(verify_token)],
     )
-    async def trigger_ebay_run(request: Request) -> RunTriggerResponse:
+    async def trigger_source_run(request: Request, source: Source) -> RunAcceptedResponse:
+        current = runtime(request)
+        if source not in {Source.EBAY, Source.SSCOM}:
+            raise HTTPException(
+                status_code=400, detail=f"Source {source.value} is not implemented"
+            )
+        if not _source_enabled(current.settings, source):
+            raise HTTPException(status_code=400, detail=f"{source.value} scanning is disabled")
+        if not _source_configured(current.settings, source):
+            raise HTTPException(status_code=400, detail=f"{source.value} is not configured")
+        notifier = _notifier(current.settings)
+        adapter: SourceAdapter | None = None
         try:
-            return await _run_ebay(runtime(request))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            adapter = await _build_adapter(current, source)
+            service = _search_service(current, notifier)
+            run_id = await service.reserve(source)
+        except Exception:
+            if adapter is not None:
+                await adapter.close()
+            if notifier is not None:
+                await notifier.close()
+            raise
+        task = asyncio.create_task(_run_prepared(adapter, service, notifier, run_id))
+        current.manual_tasks[run_id] = task
+
+        def remove_finished(finished: asyncio.Task[None]) -> None:
+            current.manual_tasks.pop(run_id, None)
+            if not finished.cancelled() and (error := finished.exception()) is not None:
+                logger.error("Manual %s run task failed: %s", source.value, type(error).__name__)
+
+        task.add_done_callback(remove_finished)
+        return RunAcceptedResponse(search_run_id=run_id, status="running")
 
     return app
 

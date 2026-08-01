@@ -43,13 +43,18 @@ class NormalizedListing(BaseModel):
     description: str = ""
     url: str
     image_urls: list[str] = Field(default_factory=list)
-    price: Decimal
+    price: Decimal | None
     currency: str = "EUR"
     shipping_cost: Decimal | None = None
     condition: ListingCondition = ListingCondition.UNKNOWN
     seller: str = ""
     seller_location: str = ""
     published_at: datetime | None = None
+    source_metadata: dict[str, Any] = Field(default_factory=dict, exclude=True)
+    rss_fingerprint_seen: str | None = Field(default=None, exclude=True)
+    rss_fingerprint_enriched: str | None = Field(default=None, exclude=True)
+    last_detail_success_at: datetime | None = Field(default=None, exclude=True)
+    detail_status: str = Field(default="not_applicable", exclude=True)
     raw_data: dict[str, Any] = Field(default_factory=dict, exclude=True)
 
 
@@ -69,6 +74,7 @@ class MatchResult(BaseModel):
     total_score: int
     compatibility_status: str
     reasons: list[ScoringReason]
+    has_part_specific_evidence: bool = False
     algorithm_version: str = "1.0"
 
 
@@ -92,7 +98,7 @@ class AlertPayload(BaseModel):
     part_name: str
     score: int
     score_explanation: list[ScoringReason]
-    price: Decimal
+    price: Decimal | None
     currency: str = "EUR"
     shipping_cost: Decimal | None = None
     seller_location: str = ""
@@ -138,7 +144,8 @@ class SourceSearchResult(BaseModel):
     hits: list[SearchHit] = Field(default_factory=list)
     successful_queries: list[str] = Field(default_factory=list)
     query_errors: dict[str, str] = Field(default_factory=dict)
-    complete: bool = True
+    discovery_complete: bool = True
+    enrichment_complete: bool = True
 
 
 class SearchRunStatus(StrEnum):

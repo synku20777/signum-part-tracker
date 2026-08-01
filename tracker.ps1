@@ -71,8 +71,8 @@ switch ($Command) {
     "logs" { docker compose logs -f $Service }
     "scan-source" {
         $source = if ($Value) { $Value } else { "ebay" }
-        if ($source -ne "ebay") { throw "Only ebay is implemented" }
-        docker compose exec $Service tracker trigger-scan ebay
+        if ($source -notin @("ebay", "sscom")) { throw "Source must be ebay or sscom" }
+        docker compose exec $Service tracker trigger-scan $source --wait
     }
     "doctor" { docker compose exec $Service tracker doctor }
     "backup" {

@@ -12,7 +12,7 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,6 +55,10 @@ class ListingRepository:
         now = datetime.now(UTC)
         source_str = listing.source.value
         condition_str = listing.condition.value
+        metadata = listing.source_metadata or {"schema_version": 1}
+        metadata_json = json.dumps(metadata, ensure_ascii=False, separators=(",", ":"))
+        if len(metadata_json.encode()) > 32 * 1024:
+            raise ValueError("Source metadata exceeds 32 KiB")
 
         existing = await self.get_by_source_and_external_id(
             session, source_str, listing.external_id
@@ -80,6 +84,11 @@ class ListingRepository:
             existing.inactive_at = None
             if not was_active:
                 existing.reactivated_at = now
+            existing.source_metadata_json = metadata_json
+            existing.rss_fingerprint_seen = listing.rss_fingerprint_seen
+            existing.rss_fingerprint_enriched = listing.rss_fingerprint_enriched
+            existing.last_detail_success_at = listing.last_detail_success_at
+            existing.detail_status = listing.detail_status
 
             await session.flush()
             return existing, False, previous_price, was_active
@@ -102,6 +111,11 @@ class ListingRepository:
             last_changed_at=now,
             is_active=True,
             consecutive_misses=0,
+            source_metadata_json=metadata_json,
+            rss_fingerprint_seen=listing.rss_fingerprint_seen,
+            rss_fingerprint_enriched=listing.rss_fingerprint_enriched,
+            last_detail_success_at=listing.last_detail_success_at,
+            detail_status=listing.detail_status,
         )
         session.add(row)
         await session.flush()
@@ -109,6 +123,10 @@ class ListingRepository:
 
     async def get_by_id(self, session: AsyncSession, listing_id: int) -> ListingRow | None:
         return await session.get(ListingRow, listing_id)
+
+    async def list_by_source(self, session: AsyncSession, source: str) -> list[ListingRow]:
+        result = await session.execute(select(ListingRow).where(ListingRow.source == source))
+        return list(result.scalars().all())
 
     async def list_listings(
         self,
@@ -298,6 +316,14 @@ class MatchRepository:
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def delete_for_listing(self, session: AsyncSession, listing_id: int) -> None:
+        await session.execute(
+            update(NotificationRow)
+            .where(NotificationRow.listing_id == listing_id)
+            .values(match_id=None)
+        )
+        await session.execute(delete(PartMatchRow).where(PartMatchRow.listing_id == listing_id))
+
     async def list_matches(
         self,
         session: AsyncSession,
@@ -405,6 +431,9 @@ class SearchRunRepository:
         session.add(row)
         await session.flush()
         return row
+
+    async def get_by_id(self, session: AsyncSession, run_id: int) -> SearchRunRow | None:
+        return await session.get(SearchRunRow, run_id)
 
     async def complete(
         self,

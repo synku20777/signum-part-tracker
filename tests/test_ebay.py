@@ -157,7 +157,8 @@ async def test_empty_results(ebay_adapter):
 
     result = await ebay_adapter.search(["test"])
     assert len(result.hits) == 0
-    assert result.complete is True
+    assert result.discovery_complete is True
+    assert result.enrichment_complete is True
 
     await ebay_adapter.close()
 

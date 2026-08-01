@@ -47,7 +47,7 @@ def _result(sample_listing, *, complete: bool = True) -> SourceSearchResult:
         hits=[SearchHit(listing=sample_listing, queries={"i3401009"})],
         successful_queries=["i3401009"] if complete else [],
         query_errors={} if complete else {"i3401009": "HTTP 429"},
-        complete=complete,
+        discovery_complete=complete,
     )
 
 
@@ -92,7 +92,7 @@ async def test_repeated_complete_scan_is_idempotent(session_factory, matcher, sa
 async def test_partial_scan_does_not_increment_misses(session_factory, matcher, sample_listing):
     service = _service(session_factory, matcher, AsyncMock(), SourceRunCoordinator(), misses=1)
     await service.run(FakeAdapter(_result(sample_listing)))
-    partial = SourceSearchResult(query_errors={"i3401009": "HTTP 429"}, complete=False)
+    partial = SourceSearchResult(query_errors={"i3401009": "HTTP 429"}, discovery_complete=False)
     result = await service.run(FakeAdapter(partial))
 
     async with session_factory() as session:
@@ -104,13 +104,65 @@ async def test_partial_scan_does_not_increment_misses(session_factory, matcher, 
 
 
 @pytest.mark.asyncio
+async def test_enrichment_partial_scan_still_applies_complete_discovery_misses(
+    session_factory, matcher, sample_listing
+):
+    service = _service(session_factory, matcher, AsyncMock(), SourceRunCoordinator(), misses=1)
+    await service.run(FakeAdapter(_result(sample_listing)))
+    result = await service.run(
+        FakeAdapter(SourceSearchResult(discovery_complete=True, enrichment_complete=False))
+    )
+    async with session_factory() as session:
+        listing = await session.scalar(select(ListingRow))
+    assert result.status.value == "partial"
+    assert listing is not None
+    assert listing.is_active is False
+
+
+@pytest.mark.asyncio
+async def test_processing_failure_suppresses_misses(session_factory, matcher, sample_listing):
+    service = _service(session_factory, matcher, AsyncMock(), SourceRunCoordinator(), misses=1)
+    await service.run(FakeAdapter(_result(sample_listing)))
+    broken = sample_listing.model_copy(deep=True)
+    broken.external_id = "broken"
+    broken.source_metadata = {"too_large": "x" * (33 * 1024)}
+    result = await service.run(FakeAdapter(_result(broken)))
+    async with session_factory() as session:
+        original = await session.scalar(
+            select(ListingRow).where(ListingRow.external_id == sample_listing.external_id)
+        )
+    assert result.status.value == "partial"
+    assert original is not None
+    assert original.consecutive_misses == 0
+
+
+@pytest.mark.asyncio
+async def test_generic_listing_removes_stale_current_match(
+    session_factory, matcher, sample_listing
+):
+    notifier = AsyncMock()
+    service = _service(session_factory, matcher, notifier, SourceRunCoordinator())
+    await service.run(FakeAdapter(_result(sample_listing)))
+    generic = sample_listing.model_copy(deep=True)
+    generic.title = "Opel Signum breaking for parts"
+    generic.description = "All parts available"
+    await service.run(FakeAdapter(_result(generic)))
+    async with session_factory() as session:
+        match_count = await session.scalar(select(func.count()).select_from(PartMatchRow))
+        notification = await session.scalar(select(NotificationRow))
+    assert match_count == 0
+    assert notification is not None
+    assert notification.match_id is None
+
+
+@pytest.mark.asyncio
 async def test_miss_threshold_and_reactivation_are_applied_once(
     session_factory, matcher, sample_listing
 ):
     notifier = AsyncMock()
     service = _service(session_factory, matcher, notifier, SourceRunCoordinator(), misses=2)
     await service.run(FakeAdapter(_result(sample_listing)))
-    empty = FakeAdapter(SourceSearchResult(complete=True))
+    empty = FakeAdapter(SourceSearchResult(discovery_complete=True))
     await service.run(empty)
     await service.run(empty)
 

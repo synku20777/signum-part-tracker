@@ -1,53 +1,54 @@
 import json
-import os
-from pathlib import Path
 import sqlite3
-import tempfile
+from contextlib import closing
+from pathlib import Path
+from uuid import uuid4
 
 from alembic import command
 from alembic.config import Config
 
 
-def _database_file() -> Path:
-    descriptor, name = tempfile.mkstemp(suffix=".sqlite")
-    os.close(descriptor)
-    Path(name).unlink()
-    return Path(name)
+def _database_file(label: str) -> Path:
+    directory = Path(__file__).resolve().parents[1] / ".pytest-tmp"
+    directory.mkdir(exist_ok=True)
+    return directory / f"{label}-{uuid4().hex}.sqlite"
 
 
 def _upgrade(monkeypatch, database: Path, revision: str) -> None:
-    monkeypatch.setenv(
-        "TRACKER_API_TOKEN", "migration-test-token-migration-test-token"
-    )
-    monkeypatch.setenv(
-        "TRACKER_DATABASE_URL", f"sqlite+aiosqlite:///{database.as_posix()}"
-    )
+    monkeypatch.setenv("TRACKER_API_TOKEN", "migration-test-token-migration-test-token")
+    monkeypatch.setenv("TRACKER_DATABASE_URL", f"sqlite+aiosqlite:///{database.as_posix()}")
     command.upgrade(Config("alembic.ini"), revision)
 
 
 def test_empty_database_migrates_to_head(monkeypatch):
-    database = _database_file()
+    database = _database_file("empty")
     try:
         _upgrade(monkeypatch, database, "head")
-        with sqlite3.connect(database) as connection:
-            revision = connection.execute(
-                "SELECT version_num FROM alembic_version"
-            ).fetchone()
-            columns = {
-                row[1] for row in connection.execute("PRAGMA table_info(listings)")
-            }
-        assert revision == ("6a26ec39bb13",)
-        assert {"image_urls_json", "consecutive_misses", "reactivated_at"} <= columns
+        with closing(sqlite3.connect(database)) as connection:
+            revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+            columns = {row[1]: row for row in connection.execute("PRAGMA table_info(listings)")}
+        assert revision == ("9c1e4a7b2f60",)
+        assert {
+            "image_urls_json",
+            "consecutive_misses",
+            "reactivated_at",
+            "source_metadata_json",
+            "rss_fingerprint_seen",
+            "rss_fingerprint_enriched",
+            "last_detail_success_at",
+            "detail_status",
+        } <= columns.keys()
+        assert columns["price"][3] == 0
     finally:
         database.unlink(missing_ok=True)
 
 
 def test_populated_revision_001_is_backfilled(monkeypatch):
-    database = _database_file()
+    database = _database_file("populated-001")
     try:
         _upgrade(monkeypatch, database, "001")
         now = "2026-08-01 12:00:00"
-        with sqlite3.connect(database) as connection:
+        with closing(sqlite3.connect(database)) as connection:
             connection.execute(
                 "INSERT INTO listings (id, source, external_id, title, description, url, "
                 "image_url, price, currency, condition, seller, seller_location, "
@@ -79,9 +80,10 @@ def test_populated_revision_001_is_backfilled(monkeypatch):
             connection.commit()
 
         _upgrade(monkeypatch, database, "head")
-        with sqlite3.connect(database) as connection:
+        with closing(sqlite3.connect(database)) as connection:
             listing = connection.execute(
-                "SELECT image_urls_json, consecutive_misses FROM listings WHERE id=1"
+                "SELECT image_urls_json, consecutive_misses, source_metadata_json, "
+                "detail_status FROM listings WHERE id=1"
             ).fetchone()
             snapshot = connection.execute(
                 "SELECT schema_version, payload_hash, image_urls_json "
@@ -96,10 +98,37 @@ def test_populated_revision_001_is_backfilled(monkeypatch):
 
         assert json.loads(listing[0]) == ["https://image"]
         assert listing[1] == 0
+        assert json.loads(listing[2]) == {"schema_version": 1}
+        assert listing[3] == "not_applicable"
         assert snapshot[0] == 1
         assert len(snapshot[1]) == 64
         assert json.loads(snapshot[2]) == ["https://image"]
         assert notification == ("legacy:1", 2)
         assert matches == [(2, "unknown")]
+    finally:
+        database.unlink(missing_ok=True)
+
+
+def test_populated_current_head_upgrades_to_sscom_revision(monkeypatch):
+    database = _database_file("populated-6a")
+    try:
+        _upgrade(monkeypatch, database, "6a26ec39bb13")
+        now = "2026-08-01 12:00:00"
+        with closing(sqlite3.connect(database)) as connection:
+            connection.execute(
+                "INSERT INTO listings (source, external_id, title, description, url, "
+                "image_urls_json, price, currency, condition, seller, seller_location, "
+                "published_at, last_seen_at, consecutive_misses, is_active) VALUES "
+                "('ebay', 'item-2', 'Title', '', 'https://item', '[]', 42, 'EUR', "
+                "'used', '', '', ?, ?, 0, 1)",
+                (now, now),
+            )
+            connection.commit()
+        _upgrade(monkeypatch, database, "head")
+        with closing(sqlite3.connect(database)) as connection:
+            row = connection.execute(
+                "SELECT price, source_metadata_json, detail_status FROM listings"
+            ).fetchone()
+        assert row == (42, '{"schema_version":1}', "not_applicable")
     finally:
         database.unlink(missing_ok=True)

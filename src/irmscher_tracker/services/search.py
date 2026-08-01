@@ -96,8 +96,12 @@ class SearchService:
         self._deduplicator = Deduplicator(self._listing_repo, self._snapshot_repo)
 
     async def run(self, adapter: SourceAdapter) -> SearchRunResult:
-        start = time.monotonic()
         source = adapter.source_name
+        run_id = await self.reserve(source)
+        return await self.run_reserved(adapter, run_id)
+
+    async def reserve(self, source: Source) -> int:
+        """Atomically create and reserve a run before work starts."""
 
         async def create_run() -> int:
             async with self._session_factory() as session:
@@ -105,7 +109,12 @@ class SearchService:
                 await session.commit()
                 return row.id
 
-        run_id = await self._coordinator.reserve(source, create_run)
+        return await self._coordinator.reserve(source, create_run)
+
+    async def run_reserved(self, adapter: SourceAdapter, run_id: int) -> SearchRunResult:
+        """Execute a run previously created by :meth:`reserve`."""
+        start = time.monotonic()
+        source = adapter.source_name
         result = SearchRunResult(source=source, run_id=run_id)
 
         try:
@@ -113,7 +122,7 @@ class SearchService:
             search_result = await adapter.search(queries)
             result.total_found = len(search_result.hits)
             result.errors.extend(
-                f"Query {query}: {error}" for query, error in search_result.query_errors.items()
+                f"Target {query}: {error}" for query, error in search_result.query_errors.items()
             )
 
             processed_listing_ids: set[int] = set()
@@ -127,12 +136,16 @@ class SearchService:
                     logger.exception("Error processing listing %s", hit.listing.external_id)
                     result.errors.append(f"Error processing listing {hit.listing.external_id}")
 
-            complete = search_result.complete and processing_complete
+            complete = (
+                search_result.discovery_complete
+                and search_result.enrichment_complete
+                and processing_complete
+            )
             result.status = SearchRunStatus.COMPLETED if complete else SearchRunStatus.PARTIAL
             result.duration_seconds = time.monotonic() - start
 
             async with self._session_factory() as session:
-                if complete:
+                if search_result.discovery_complete and processing_complete:
                     await self._listing_repo.increment_misses_for_unseen(
                         session,
                         source.value,
@@ -182,7 +195,13 @@ class SearchService:
                 result.updated_listings += 1
 
             match = self._matcher.match(listing)
-            if match is None or match.total_score <= 0:
+            if (
+                match is None
+                or not match.has_part_specific_evidence
+                or match.total_score <= 0
+                or match.compatibility_status == "incompatible"
+            ):
+                await self._match_repo.delete_for_listing(session, db_listing.id)
                 await session.commit()
                 return db_listing.id
 
@@ -243,7 +262,13 @@ class SearchService:
             alert_type = AlertType.NEW_LISTING
         elif not was_active:
             alert_type = AlertType.REACTIVATED
-        elif has_changes and previous_price is not None and listing.price < previous_price:
+        elif (
+            has_changes
+            and listing.price is not None
+            and previous_price is not None
+            and previous_price > 0
+            and listing.price < previous_price
+        ):
             decrease = ((previous_price - listing.price) / previous_price) * 100
             if decrease >= self._price_change_percent:
                 alert_type = AlertType.PRICE_DECREASE
@@ -278,6 +303,7 @@ class SearchService:
             return f"new:{prefix}"
         if alert.alert_type is AlertType.PRICE_DECREASE:
             assert alert.previous_price is not None
+            assert alert.price is not None
             old = alert.previous_price.quantize(Decimal("0.01"))
             new = alert.price.quantize(Decimal("0.01"))
             return f"price-drop:{prefix}:{old}:{new}"

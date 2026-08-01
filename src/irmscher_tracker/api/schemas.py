@@ -13,6 +13,7 @@ class HealthResponse(BaseModel):
     database: Literal["ok", "error"]
     scheduler: Literal["running", "stopped"]
     ebay_configured: bool
+    sscom_configured: bool
     telegram_configured: bool
 
 
@@ -24,7 +25,7 @@ class ListingResponse(BaseModel):
     description: str
     url: str
     image_urls: list[str]
-    price: Decimal
+    price: Decimal | None
     currency: str
     shipping_cost: Decimal | None
     condition: str
@@ -64,11 +65,6 @@ class SearchRunResponse(BaseModel):
     status: str
 
 
-class RunTriggerResponse(BaseModel):
+class RunAcceptedResponse(BaseModel):
     search_run_id: int
     status: str
-    message: str
-    total_found: int = 0
-    new_listings: int = 0
-    matches_found: int = 0
-    alerts_sent: int = 0

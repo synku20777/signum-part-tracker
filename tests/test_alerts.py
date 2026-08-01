@@ -11,6 +11,7 @@ from irmscher_tracker.domain import (
     ScoringReason,
     Source,
 )
+from irmscher_tracker.notifications.telegram import TelegramNotifier
 from irmscher_tracker.services.alert import AlertService
 from irmscher_tracker.services.search import SearchService, SourceRunCoordinator
 
@@ -127,6 +128,26 @@ async def test_small_price_change_no_alert(search_service, sample_listing, sampl
 
 
 @pytest.mark.asyncio
+async def test_missing_or_zero_previous_price_does_not_alert(
+    search_service, sample_listing, sample_match
+):
+    sample_listing.price = None
+    assert (
+        search_service._determine_alert(
+            sample_listing, sample_match, False, True, Decimal("100"), True
+        )
+        is None
+    )
+    sample_listing.price = Decimal("90")
+    assert (
+        search_service._determine_alert(
+            sample_listing, sample_match, False, True, Decimal("0"), True
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_reactivated_listing_alert(search_service, sample_listing, sample_match):
     alert = search_service._determine_alert(
         listing=sample_listing,
@@ -153,3 +174,13 @@ async def test_notification_failure_recorded(mock_notifier, base_payload):
     service = AlertService(notifier=mock_notifier)
     result = await service.send(base_payload)
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_telegram_formats_missing_price(base_payload):
+    base_payload.price = None
+    notifier = TelegramNotifier("token", "chat")
+    try:
+        assert "Price unavailable" in notifier._format_message(base_payload)
+    finally:
+        await notifier.close()

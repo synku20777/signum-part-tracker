@@ -8,9 +8,9 @@ stay inside this module.
 from __future__ import annotations
 
 import base64
-from contextlib import suppress
 import logging
 import time
+from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -135,7 +135,8 @@ class EbayAdapter(SourceAdapter):
             hits=list(seen.values()),
             successful_queries=successful_queries,
             query_errors=query_errors,
-            complete=not query_errors,
+            discovery_complete=not query_errors,
+            enrichment_complete=True,
         )
 
     async def close(self) -> None:
@@ -253,9 +254,10 @@ class EbayAdapter(SourceAdapter):
         # Price
         price_data = item.get("price", {})
         try:
-            price = Decimal(str(price_data.get("value", "0")))
+            raw_price = price_data.get("value")
+            price = Decimal(str(raw_price)) if raw_price is not None else None
         except InvalidOperation:
-            price = Decimal("0")
+            price = None
         currency: str = price_data.get("currency", "EUR")
 
         # Shipping

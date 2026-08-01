@@ -1,7 +1,7 @@
 from decimal import Decimal
 from pathlib import Path
 
-from pydantic import SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     ebay_api_timeout: float = 30.0
     ebay_max_results_per_query: int = 200
 
+    sscom_enabled: bool = False
+    sscom_interval_minutes: int = Field(default=60, ge=5)
+    sscom_request_timeout: float = Field(default=20.0, gt=0, le=120)
+    sscom_max_detail_requests_per_run: int = Field(default=30, ge=0, le=100)
+    sscom_detail_refresh_hours: int = Field(default=24, ge=1)
+
     telegram_enabled: bool = True
     telegram_bot_token: SecretStr = SecretStr("")
     telegram_chat_id: str = ""
@@ -48,6 +54,10 @@ class Settings(BaseSettings):
     @property
     def parts_config_path(self) -> Path:
         return self.config_directory / "parts.yaml"
+
+    @property
+    def sources_config_path(self) -> Path:
+        return self.config_directory / "sources.yaml"
 
 
 def get_settings() -> Settings:
