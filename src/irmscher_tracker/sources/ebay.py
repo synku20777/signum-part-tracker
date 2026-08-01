@@ -8,7 +8,9 @@ stay inside this module.
 from __future__ import annotations
 
 import base64
+from contextlib import suppress
 import logging
+import time
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -21,7 +23,13 @@ from tenacity import (
     wait_exponential,
 )
 
-from irmscher_tracker.domain import ListingCondition, NormalizedListing, Source
+from irmscher_tracker.domain import (
+    ListingCondition,
+    NormalizedListing,
+    SearchHit,
+    Source,
+    SourceSearchResult,
+)
 from irmscher_tracker.sources.base import SourceAdapter
 
 logger = logging.getLogger(__name__)
@@ -63,6 +71,10 @@ class EbayApiError(Exception):
     """Raised on non-retryable eBay API errors."""
 
 
+class RetryableEbayError(Exception):
+    """Raised for eBay responses that are safe to retry."""
+
+
 class EbayAdapter(SourceAdapter):
     """eBay Browse API adapter.
 
@@ -84,6 +96,7 @@ class EbayAdapter(SourceAdapter):
         self._max_results_per_query = max_results_per_query
         self._client = httpx.AsyncClient(timeout=timeout)
         self._token: str | None = None
+        self._token_expires_at = 0.0
 
     # -- SourceAdapter interface ----------------------------------------
 
@@ -91,25 +104,39 @@ class EbayAdapter(SourceAdapter):
     def source_name(self) -> Source:
         return Source.EBAY
 
-    async def search(self, queries: list[str]) -> list[NormalizedListing]:
-        """Search eBay with *queries*, paginate, deduplicate by itemId."""
-        seen: dict[str, NormalizedListing] = {}
+    async def search(self, queries: list[str]) -> SourceSearchResult:
+        """Search eBay and preserve completeness and query provenance."""
+        seen: dict[str, SearchHit] = {}
+        successful_queries: list[str] = []
+        query_errors: dict[str, str] = {}
         token = await self._get_token()
 
         for query in queries:
             try:
-                items = await self._search_single(query, token)
+                items, complete = await self._search_single(query, token)
                 for item in items:
                     listing = self._normalize(item)
-                    # first occurrence wins
-                    if listing.external_id not in seen:
-                        seen[listing.external_id] = listing
+                    hit = seen.setdefault(
+                        listing.external_id,
+                        SearchHit(listing=listing),
+                    )
+                    hit.queries.add(query)
+                if complete:
+                    successful_queries.append(query)
+                else:
+                    query_errors[query] = "Result limit reached before pagination completed"
             except EbayAuthError:
                 raise
-            except Exception:
+            except Exception as exc:
                 logger.exception("Error searching eBay for query '%s'", query)
+                query_errors[query] = type(exc).__name__
 
-        return list(seen.values())
+        return SourceSearchResult(
+            hits=list(seen.values()),
+            successful_queries=successful_queries,
+            query_errors=query_errors,
+            complete=not query_errors,
+        )
 
     async def close(self) -> None:
         """Shut down the underlying HTTP client."""
@@ -141,11 +168,13 @@ class EbayAdapter(SourceAdapter):
 
         data = response.json()
         token: str = data["access_token"]
+        expires_in = max(int(data.get("expires_in", 7200)), 0)
+        self._token_expires_at = time.monotonic() + max(expires_in - 60, 0)
         return token
 
     async def _get_token(self) -> str:
         """Return a cached token, or authenticate first."""
-        if self._token is None:
+        if self._token is None or time.monotonic() >= self._token_expires_at:
             self._token = await self._authenticate()
         return self._token
 
@@ -154,9 +183,9 @@ class EbayAdapter(SourceAdapter):
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((httpx.RequestError, httpx.HTTPStatusError)),
+        retry=retry_if_exception_type((httpx.RequestError, RetryableEbayError)),
     )
-    async def _search_single(self, query: str, token: str) -> list[dict[str, Any]]:
+    async def _search_single(self, query: str, token: str) -> tuple[list[dict[str, Any]], bool]:
         """Execute a single search query with pagination."""
         headers = {
             "Authorization": f"Bearer {token}",
@@ -166,6 +195,7 @@ class EbayAdapter(SourceAdapter):
         results: list[dict[str, Any]] = []
         offset = 0
         page_size = 50
+        total: int | None = None
 
         while offset < self._max_results_per_query:
             params: dict[str, str | int] = {
@@ -191,10 +221,14 @@ class EbayAdapter(SourceAdapter):
                     params=params,
                 )
 
-            # Let tenacity retry on 429 / 5xx via raise_for_status.
-            response.raise_for_status()
+            if response.status_code == 429 or response.status_code >= 500:
+                raise RetryableEbayError(f"eBay returned HTTP {response.status_code}")
+            if response.is_error:
+                raise EbayApiError(f"eBay returned HTTP {response.status_code}")
 
             data = response.json()
+            response_total = data.get("total")
+            total = response_total if isinstance(response_total, int) else total
             items: list[dict[str, Any]] = data.get("itemSummaries", [])
             results.extend(items)
 
@@ -203,7 +237,9 @@ class EbayAdapter(SourceAdapter):
 
             offset += page_size
 
-        return results[: self._max_results_per_query]
+        reached_limit = len(results) >= self._max_results_per_query
+        complete = not reached_limit or (isinstance(total, int) and total <= len(results))
+        return results[: self._max_results_per_query], complete
 
     # -- Normalisation --------------------------------------------------
 
@@ -228,10 +264,8 @@ class EbayAdapter(SourceAdapter):
         if shipping_options:
             ship_val = shipping_options[0].get("shippingCost", {}).get("value")
             if ship_val is not None:
-                try:
+                with suppress(InvalidOperation):
                     shipping_cost = Decimal(str(ship_val))
-                except InvalidOperation:
-                    pass
 
         # Condition
         condition_str = item.get("condition", "")

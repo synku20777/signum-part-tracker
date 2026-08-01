@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 TELEGRAM_API_BASE = "https://api.telegram.org"
 
+
 class TelegramNotifier:
     def __init__(self, bot_token: str, chat_id: str, timeout: float = 15.0):
         self._bot_token = bot_token
@@ -21,12 +22,15 @@ class TelegramNotifier:
         message = self._format_message(payload)
         url = f"{TELEGRAM_API_BASE}/bot{self._bot_token}/sendMessage"
 
-        response = await self._client.post(url, json={
-            "chat_id": self._chat_id,
-            "text": message,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": False,
-        })
+        response = await self._client.post(
+            url,
+            json={
+                "chat_id": self._chat_id,
+                "text": message,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": False,
+            },
+        )
         response.raise_for_status()
         logger.info("Telegram message sent successfully")
 
@@ -34,11 +38,14 @@ class TelegramNotifier:
         """Send a test message to verify configuration."""
         url = f"{TELEGRAM_API_BASE}/bot{self._bot_token}/sendMessage"
         try:
-            response = await self._client.post(url, json={
-                "chat_id": self._chat_id,
-                "text": "\u2705 Irmscher Tracker notification test successful!",
-                "parse_mode": "HTML",
-            })
+            response = await self._client.post(
+                url,
+                json={
+                    "chat_id": self._chat_id,
+                    "text": "\u2705 Irmscher Tracker notification test successful!",
+                    "parse_mode": "HTML",
+                },
+            )
             response.raise_for_status()
             return True
         except Exception:

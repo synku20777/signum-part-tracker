@@ -10,9 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
-from typing import Any
+from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,7 +24,12 @@ from irmscher_tracker.db.models import (
     PartMatchRow,
     SearchRunRow,
 )
-from irmscher_tracker.domain import NormalizedListing
+from irmscher_tracker.domain import (
+    MatchResult,
+    NormalizedListing,
+    SearchRunResult,
+    SearchRunStatus,
+)
 
 
 class ListingRepository:
@@ -42,21 +47,22 @@ class ListingRepository:
 
     async def upsert(
         self, session: AsyncSession, listing: NormalizedListing
-    ) -> tuple[ListingRow, bool]:
+    ) -> tuple[ListingRow, bool, Decimal | None, bool]:
         """Insert or update a listing.
 
-        Returns ``(row, is_new)`` where *is_new* is ``True`` when the
-        listing was created for the first time.
+        Returns the row, creation flag, previous price, and previous active state.
         """
         now = datetime.now(UTC)
-        source_str = listing.source.value if hasattr(listing.source, "value") else str(listing.source)
-        condition_str = listing.condition.value if hasattr(listing.condition, "value") else str(listing.condition)
+        source_str = listing.source.value
+        condition_str = listing.condition.value
 
         existing = await self.get_by_source_and_external_id(
             session, source_str, listing.external_id
         )
 
         if existing is not None:
+            previous_price = existing.price
+            was_active = existing.is_active
             existing.title = listing.title
             existing.description = listing.description
             existing.url = listing.url
@@ -67,9 +73,16 @@ class ListingRepository:
             existing.condition = condition_str
             existing.seller = listing.seller
             existing.seller_location = listing.seller_location
+            existing.published_at = listing.published_at or existing.published_at
+            existing.last_seen_at = now
+            existing.consecutive_misses = 0
+            existing.is_active = True
+            existing.inactive_at = None
+            if not was_active:
+                existing.reactivated_at = now
 
             await session.flush()
-            return existing, False
+            return existing, False, previous_price, was_active
 
         row = ListingRow(
             source=source_str,
@@ -92,11 +105,9 @@ class ListingRepository:
         )
         session.add(row)
         await session.flush()
-        return row, True
+        return row, True, None, True
 
-    async def get_by_id(
-        self, session: AsyncSession, listing_id: int
-    ) -> ListingRow | None:
+    async def get_by_id(self, session: AsyncSession, listing_id: int) -> ListingRow | None:
         return await session.get(ListingRow, listing_id)
 
     async def list_listings(
@@ -130,20 +141,44 @@ class ListingRepository:
         row = (await session.execute(stmt)).scalar_one_or_none()
         now = datetime.now(UTC)
         if row is None:
-            session.add(ListingQueryRow(
-                listing_id=listing_id, source=source, query=query, last_seen_at=now
-            ))
+            session.add(
+                ListingQueryRow(
+                    listing_id=listing_id, source=source, query=query, last_seen_at=now
+                )
+            )
         else:
             row.last_seen_at = now
         await session.flush()
 
-    async def mark_inactive(
-        self, session: AsyncSession, listing_id: int
-    ) -> None:
+    async def mark_inactive(self, session: AsyncSession, listing_id: int) -> None:
         row = await self.get_by_id(session, listing_id)
         if row is not None and row.is_active:
             row.is_active = False
             row.inactive_at = datetime.now(UTC)
+
+    async def increment_misses_for_unseen(
+        self,
+        session: AsyncSession,
+        source: str,
+        seen_ids: set[int],
+        threshold: int,
+    ) -> None:
+        missing = update(ListingRow).where(
+            ListingRow.source == source,
+            ListingRow.is_active.is_(True),
+        )
+        if seen_ids:
+            missing = missing.where(ListingRow.id.not_in(seen_ids))
+        await session.execute(missing.values(consecutive_misses=ListingRow.consecutive_misses + 1))
+        await session.execute(
+            update(ListingRow)
+            .where(
+                ListingRow.source == source,
+                ListingRow.is_active.is_(True),
+                ListingRow.consecutive_misses >= threshold,
+            )
+            .values(is_active=False, inactive_at=datetime.now(UTC))
+        )
 
 
 class SnapshotRepository:
@@ -169,17 +204,17 @@ class SnapshotRepository:
     ) -> ListingSnapshotRow | None:
         """Create a snapshot only when tracked fields differ from the latest."""
         latest = await self.get_latest(session, listing_id)
-        condition_str = listing.condition.value if hasattr(listing.condition, "value") else str(listing.condition)
+        condition_str = listing.condition.value
 
-        def canonical_decimal(d) -> str | None:
-            from decimal import Decimal
-            return str(d.quantize(Decimal("0.01"))) if d is not None else None
+        def canonical_decimal(value: Decimal | None) -> str | None:
+            return str(value.quantize(Decimal("0.01"))) if value is not None else None
 
         import re
+
         canonical_url = listing.url.strip()
         # normalize whitespace
-        canonical_title = re.sub(r'\s+', ' ', listing.title.strip())
-        canonical_desc = re.sub(r'\s+', ' ', listing.description.strip())
+        canonical_title = re.sub(r"\s+", " ", listing.title.strip())
+        canonical_desc = re.sub(r"\s+", " ", listing.description.strip())
 
         snapshot_payload = {
             "schema_version": 1,
@@ -195,7 +230,7 @@ class SnapshotRepository:
             "url": canonical_url,
         }
 
-        payload_json = json.dumps(snapshot_payload, sort_keys=True)
+        payload_json = json.dumps(snapshot_payload, sort_keys=True, separators=(",", ":"))
         payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
 
         if latest is not None and latest.payload_hash == payload_hash:
@@ -234,25 +269,20 @@ class SnapshotRepository:
 class MatchRepository:
     """CRUD operations for ``PartMatchRow``."""
 
-    async def create(
-        self, session: AsyncSession, listing_id: int, match: Any
+    async def upsert(
+        self, session: AsyncSession, listing_id: int, match: MatchResult
     ) -> PartMatchRow:
-        # Serialise reasons – handles both dicts and Pydantic models.
-        if match.reasons and hasattr(match.reasons[0], "model_dump"):
-            reasons_data = [r.model_dump() for r in match.reasons]
-        else:
-            reasons_data = match.reasons
-        row = PartMatchRow(
-            listing_id=listing_id,
-            part_id=match.part_id,
-            part_name=match.part_name,
-            total_score=match.total_score,
-            compatibility_status=match.compatibility_status,
-            reasons_json=json.dumps(reasons_data),
-            algorithm_version=match.algorithm_version,
-            matched_at=datetime.now(UTC),
-        )
-        session.add(row)
+        row = await self.get_best_for_listing(session, listing_id)
+        if row is None:
+            row = PartMatchRow(listing_id=listing_id)
+            session.add(row)
+        row.part_id = match.part_id
+        row.part_name = match.part_name
+        row.total_score = match.total_score
+        row.compatibility_status = match.compatibility_status
+        row.reasons_json = json.dumps([reason.model_dump() for reason in match.reasons])
+        row.algorithm_version = match.algorithm_version
+        row.matched_at = datetime.now(UTC)
         await session.flush()
         return row
 
@@ -281,11 +311,7 @@ class MatchRepository:
             stmt = stmt.where(PartMatchRow.part_id == part_id)
         if min_score is not None:
             stmt = stmt.where(PartMatchRow.total_score >= min_score)
-        stmt = (
-            stmt.order_by(PartMatchRow.matched_at.desc())
-            .limit(limit)
-            .offset(offset)
-        )
+        stmt = stmt.order_by(PartMatchRow.matched_at.desc()).limit(limit).offset(offset)
         result = await session.execute(stmt)
         return list(result.scalars().all())
 
@@ -293,21 +319,15 @@ class MatchRepository:
 class NotificationRepository:
     """CRUD operations for ``NotificationRow``."""
 
-    async def create(
+    async def reserve(
         self,
         session: AsyncSession,
         listing_id: int,
         match_id: int | None,
         alert_type: str,
         payload: str,
-        success: bool,
-        error_message: str | None,
-        event_key: str | None = None,
+        event_key: str,
     ) -> NotificationRow | None:
-        if not event_key:
-            import uuid
-            event_key = str(uuid.uuid4())
-
         stmt = (
             insert(NotificationRow)
             .values(
@@ -317,25 +337,33 @@ class NotificationRepository:
                 alert_type=alert_type,
                 payload_json=payload,
                 sent_at=datetime.now(UTC),
-                success=success,
-                error_message=error_message,
+                success=False,
+                error_message=None,
             )
             .on_conflict_do_nothing(index_elements=["event_key"])
+            .returning(NotificationRow.id)
         )
 
         result = await session.execute(stmt)
         await session.flush()
-
-        if result.rowcount == 0:
+        notification_id = result.scalar_one_or_none()
+        if notification_id is None:
             return None
+        return await session.get(NotificationRow, notification_id)
 
-        # retrieve row
-        stmt_get = select(NotificationRow).where(NotificationRow.event_key == event_key)
-        return (await session.execute(stmt_get)).scalar_one_or_none()
+    async def finish(
+        self,
+        session: AsyncSession,
+        notification_id: int,
+        success: bool,
+        error_message: str | None,
+    ) -> None:
+        row = await session.get(NotificationRow, notification_id)
+        if row is not None:
+            row.success = success
+            row.error_message = error_message
 
-    async def was_notified(
-        self, session: AsyncSession, listing_id: int, alert_type: str
-    ) -> bool:
+    async def was_notified(self, session: AsyncSession, listing_id: int, alert_type: str) -> bool:
         stmt = (
             select(NotificationRow)
             .where(
@@ -363,9 +391,7 @@ class NotificationRepository:
 class SearchRunRepository:
     """CRUD operations for ``SearchRunRow``."""
 
-    async def create(
-        self, session: AsyncSession, source: str
-    ) -> SearchRunRow:
+    async def create(self, session: AsyncSession, source: str) -> SearchRunRow:
         row = SearchRunRow(
             source=source,
             started_at=datetime.now(UTC),
@@ -381,7 +407,11 @@ class SearchRunRepository:
         return row
 
     async def complete(
-        self, session: AsyncSession, run_id: int, result: Any
+        self,
+        session: AsyncSession,
+        run_id: int,
+        result: SearchRunResult,
+        status: SearchRunStatus = SearchRunStatus.COMPLETED,
     ) -> None:
         row = await session.get(SearchRunRow, run_id)
         if row is not None:
@@ -391,16 +421,39 @@ class SearchRunRepository:
             row.updated_listings = result.updated_listings
             row.matches_found = result.matches_found
             row.alerts_sent = result.alerts_sent
-            row.status = "completed"
+            row.errors_json = json.dumps(result.errors) if result.errors else None
+            row.status = status.value
 
-    async def fail(
-        self, session: AsyncSession, run_id: int, error: str
-    ) -> None:
+    async def fail(self, session: AsyncSession, run_id: int, error: str) -> None:
         row = await session.get(SearchRunRow, run_id)
         if row is not None:
             row.finished_at = datetime.now(UTC)
             row.errors_json = json.dumps({"error": error})
-            row.status = "failed"
+            row.status = SearchRunStatus.FAILED.value
+
+    async def finish_with_status(
+        self,
+        session: AsyncSession,
+        run_id: int,
+        status: SearchRunStatus,
+        error: str | None = None,
+    ) -> None:
+        row = await session.get(SearchRunRow, run_id)
+        if row is not None:
+            row.finished_at = datetime.now(UTC)
+            row.status = status.value
+            row.errors_json = json.dumps({"error": error}) if error else None
+
+    async def interrupt_stale(self, session: AsyncSession) -> None:
+        await session.execute(
+            update(SearchRunRow)
+            .where(SearchRunRow.status == SearchRunStatus.RUNNING.value)
+            .values(
+                finished_at=datetime.now(UTC),
+                status=SearchRunStatus.INTERRUPTED.value,
+                errors_json=json.dumps({"error": "Interrupted by tracker restart"}),
+            )
+        )
 
     async def list_runs(
         self, session: AsyncSession, limit: int = 100, offset: int = 0

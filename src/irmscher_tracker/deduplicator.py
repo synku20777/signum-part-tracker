@@ -31,42 +31,31 @@ class Deduplicator:
         self,
         session: AsyncSession,
         listing: NormalizedListing,
-    ) -> tuple[ListingRow, bool, bool, Decimal | None]:
+    ) -> tuple[ListingRow, bool, bool, Decimal | None, bool]:
         """Process a listing for deduplication.
 
         Returns
         -------
-        (db_listing, is_new, has_changes, previous_price)
+        (db_listing, is_new, has_changes, previous_price, was_active)
             *previous_price* is the price stored in the database **before**
             the update was applied.  It is ``None`` for brand-new listings.
         """
-        source_str = (
-            listing.source.value
-            if hasattr(listing.source, "value")
-            else str(listing.source)
+        db_listing, is_new, previous_price, was_active = await self._listing_repo.upsert(
+            session, listing
         )
-
-        # Look up existing row BEFORE upserting so we can capture the
-        # previous price before it is overwritten.
-        existing = await self._listing_repo.get_by_source_and_external_id(
-            session, source_str, listing.external_id
-        )
-        previous_price: Decimal | None = existing.price if existing is not None else None
-
-        db_listing, is_new = await self._listing_repo.upsert(session, listing)
 
         if is_new:
             # Always create the initial snapshot.
-            await self._snapshot_repo.create_if_changed(
-                session, db_listing.id, listing
-            )
-            return db_listing, True, True, None
+            await self._snapshot_repo.create_if_changed(session, db_listing.id, listing)
+            return db_listing, True, True, None, True
 
         # For existing listings, create a snapshot only when tracked
         # fields differ from the latest snapshot.
-        snapshot = await self._snapshot_repo.create_if_changed(
-            session, db_listing.id, listing
-        )
+        snapshot = await self._snapshot_repo.create_if_changed(session, db_listing.id, listing)
         has_changes = snapshot is not None
+        if has_changes:
+            from datetime import UTC, datetime
 
-        return db_listing, False, has_changes, previous_price
+            db_listing.last_changed_at = datetime.now(UTC)
+
+        return db_listing, False, has_changes, previous_price, was_active

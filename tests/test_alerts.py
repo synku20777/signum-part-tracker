@@ -12,7 +12,7 @@ from irmscher_tracker.domain import (
     Source,
 )
 from irmscher_tracker.services.alert import AlertService
-from irmscher_tracker.services.search import SearchService
+from irmscher_tracker.services.search import SearchService, SourceRunCoordinator
 
 
 @pytest.fixture
@@ -20,6 +20,7 @@ def mock_notifier():
     notifier = AsyncMock()
     notifier.send_alert = AsyncMock()
     return notifier
+
 
 @pytest.fixture
 def base_payload():
@@ -32,8 +33,9 @@ def base_payload():
         part_name="Test Part",
         score=100,
         score_explanation=[ScoringReason(rule="test", points=100)],
-        price=Decimal("100.00")
+        price=Decimal("100.00"),
     )
+
 
 @pytest.fixture
 def search_service():
@@ -41,9 +43,11 @@ def search_service():
         session_factory=None,
         matcher=None,
         alert_service=None,
+        coordinator=SourceRunCoordinator(),
         score_threshold=50,
-        price_change_percent=Decimal("5.0")
+        price_change_percent=Decimal("5.0"),
     )
+
 
 @pytest.fixture
 def sample_match():
@@ -52,18 +56,16 @@ def sample_match():
         part_name="Part 1",
         total_score=60,
         compatibility_status="probable",
-        reasons=[]
+        reasons=[],
     )
+
 
 @pytest.fixture
 def sample_listing():
     return NormalizedListing(
-        source=Source.EBAY,
-        external_id="123",
-        title="Part",
-        url="http://",
-        price=Decimal("100.00")
+        source=Source.EBAY, external_id="123", title="Part", url="http://", price=Decimal("100.00")
     )
+
 
 @pytest.mark.asyncio
 async def test_new_listing_triggers_alert(search_service, sample_listing, sample_match):
@@ -73,23 +75,25 @@ async def test_new_listing_triggers_alert(search_service, sample_listing, sample
         is_new=True,
         has_changes=False,
         previous_price=None,
-        was_active=True
+        was_active=True,
     )
     assert alert is not None
     assert alert.alert_type == AlertType.NEW_LISTING
 
+
 @pytest.mark.asyncio
 async def test_below_threshold_no_alert(search_service, sample_listing, sample_match):
-    sample_match.total_score = 40 # Below threshold of 50
+    sample_match.total_score = 40  # Below threshold of 50
     alert = search_service._determine_alert(
         listing=sample_listing,
         match=sample_match,
         is_new=True,
         has_changes=False,
         previous_price=None,
-        was_active=True
+        was_active=True,
     )
     assert alert is None
+
 
 @pytest.mark.asyncio
 async def test_price_decrease_triggers_alert(search_service, sample_listing, sample_match):
@@ -101,10 +105,11 @@ async def test_price_decrease_triggers_alert(search_service, sample_listing, sam
         is_new=False,
         has_changes=True,
         previous_price=Decimal("100.00"),
-        was_active=True
+        was_active=True,
     )
     assert alert is not None
     assert alert.alert_type == AlertType.PRICE_DECREASE
+
 
 @pytest.mark.asyncio
 async def test_small_price_change_no_alert(search_service, sample_listing, sample_match):
@@ -116,9 +121,10 @@ async def test_small_price_change_no_alert(search_service, sample_listing, sampl
         is_new=False,
         has_changes=True,
         previous_price=Decimal("100.00"),
-        was_active=True
+        was_active=True,
     )
     assert alert is None
+
 
 @pytest.mark.asyncio
 async def test_reactivated_listing_alert(search_service, sample_listing, sample_match):
@@ -128,16 +134,18 @@ async def test_reactivated_listing_alert(search_service, sample_listing, sample_
         is_new=False,
         has_changes=False,
         previous_price=None,
-        was_active=False
+        was_active=False,
     )
     assert alert is not None
     assert alert.alert_type == AlertType.REACTIVATED
+
 
 @pytest.mark.asyncio
 async def test_no_notifier_configured(base_payload):
     service = AlertService(notifier=None)
     result = await service.send(base_payload)
     assert result is False
+
 
 @pytest.mark.asyncio
 async def test_notification_failure_recorded(mock_notifier, base_payload):

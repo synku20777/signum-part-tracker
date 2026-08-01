@@ -2,16 +2,24 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
+import subprocess
 import sys
+from pathlib import Path
 
+import httpx
 import typer
 import uvicorn
 from rich.console import Console
 from rich.logging import RichHandler
 
-app = typer.Typer(name="tracker", help="Irmscher Parts Tracker CLI")
+from irmscher_tracker.settings import Settings, get_settings
 
+app = typer.Typer(name="tracker", help="Irmscher Parts Tracker CLI")
+db_app = typer.Typer(help="Database commands")
+app.add_typer(db_app, name="db")
 console = Console()
+
 
 def setup_logging(level: str = "INFO") -> None:
     logging.basicConfig(
@@ -20,36 +28,49 @@ def setup_logging(level: str = "INFO") -> None:
         handlers=[RichHandler(rich_tracebacks=True)],
     )
 
+
+def _database_path(settings: Settings) -> Path:
+    prefix = "sqlite+aiosqlite:///"
+    if not settings.database_url.startswith(prefix):
+        raise typer.BadParameter("Backup and restore require a SQLite database")
+    return Path(settings.database_url.removeprefix(prefix)).resolve()
+
+
+def _data_file(value: str, database_path: Path) -> Path:
+    path = Path(value).resolve()
+    if path.parent != database_path.parent:
+        raise typer.BadParameter("Path must be directly inside the tracker data directory")
+    return path
+
+
 @app.command("trigger-scan")
-def trigger_scan() -> None:
-    """Trigger a search scan via the API."""
-    setup_logging()
-    import httpx
-
-    from irmscher_tracker.settings import get_settings
+def trigger_scan(source: str = typer.Argument("ebay")) -> None:
+    """Trigger a source scan through the authenticated API."""
+    if source != "ebay":
+        raise typer.BadParameter("Only the ebay source is implemented")
     settings = get_settings()
-
     headers = {"Authorization": f"Bearer {settings.api_token.get_secret_value()}"}
     try:
-        console.print("[yellow]Triggering eBay search via API...[/yellow]")
-        resp = httpx.post("http://127.0.0.1:8000/runs/ebay", headers=headers, timeout=120.0)
-        resp.raise_for_status()
-        console.print("[green]Scan completed successfully[/green]")
-        console.print(resp.json())
-    except httpx.HTTPStatusError as e:
-        console.print(f"[red]API Error ({e.response.status_code}):[/red] {e.response.text}")
-        raise typer.Exit(code=1)
-    except httpx.RequestError as e:
-        console.print(f"[red]Failed to connect to API:[/red] {e}")
-        console.print("[yellow]Is the tracker container running?[/yellow]")
-        raise typer.Exit(code=1)
+        response = httpx.post(
+            f"http://127.0.0.1:{settings.api_port}/runs/ebay",
+            headers=headers,
+            timeout=120.0,
+        )
+        response.raise_for_status()
+        console.print(response.json())
+    except httpx.HTTPStatusError as exc:
+        console.print(f"API error ({exc.response.status_code}): {exc.response.text}")
+        raise typer.Exit(code=1) from exc
+    except httpx.RequestError as exc:
+        console.print(f"Failed to connect to API: {exc}")
+        raise typer.Exit(code=1) from exc
+
 
 @app.command("serve")
 def serve(
     host: str = typer.Option("0.0.0.0", help="Bind host"),
     port: int = typer.Option(8000, help="Bind port"),
 ) -> None:
-    """Start the FastAPI server."""
     setup_logging()
     uvicorn.run(
         "irmscher_tracker.api.app:create_app",
@@ -58,115 +79,90 @@ def serve(
         factory=True,
     )
 
+
 @app.command("doctor")
 def doctor() -> None:
-    """Check system health and configuration."""
-    setup_logging()
-    import os
-
-    import httpx
-
-    from irmscher_tracker.settings import get_settings
-
+    """Check the database, config file, API, and optional integrations."""
     settings = get_settings()
-    console.print("[bold]System Health Check[/bold]")
-
-    # Check DB
-    db_path = settings.database_url.replace("sqlite+aiosqlite:///", "")
-    if os.path.exists(db_path):
-        console.print(f"✅ Database found at {db_path}")
-    else:
-        console.print(f"❌ Database missing at {db_path} (Run 'tracker db upgrade'?)")
-
-    # Check API
+    database_path = _database_path(settings)
+    checks = {
+        "database": database_path.exists(),
+        "parts config": settings.parts_config_path.exists(),
+        "eBay": bool(settings.ebay_client_id and settings.ebay_client_secret.get_secret_value()),
+        "Telegram": bool(
+            settings.telegram_bot_token.get_secret_value() and settings.telegram_chat_id
+        ),
+    }
     try:
-        resp = httpx.get("http://127.0.0.1:8000/health", timeout=5.0)
-        if resp.status_code == 200:
-            console.print(f"✅ API responding (v{resp.json()['version']})")
-        else:
-            console.print(f"❌ API returned status {resp.status_code}")
+        response = httpx.get(f"http://127.0.0.1:{settings.api_port}/health", timeout=5.0)
+        checks["API"] = response.status_code == 200
     except httpx.RequestError:
-        console.print("❌ API not reachable")
+        checks["API"] = False
+    for name, healthy in checks.items():
+        console.print(f"{'OK' if healthy else 'MISSING'}: {name}")
+    if not checks["database"] or not checks["parts config"] or not checks["API"]:
+        raise typer.Exit(code=1)
 
-    # Check parts.yaml
-    if os.path.exists(settings.parts_config_path):
-        console.print(f"✅ parts config found at {settings.parts_config_path}")
-    else:
-        console.print(f"❌ parts config missing at {settings.parts_config_path}")
 
 @app.command("backup")
-def backup(dest: str = typer.Argument(..., help="Destination sqlite file")) -> None:
-    """Safely backup the SQLite database using VACUUM INTO."""
-    setup_logging()
-    import os
-    import sqlite3
+def backup(destination: str) -> None:
+    """Create a consistent SQLite backup inside the data directory."""
+    database_path = _database_path(get_settings())
+    destination_path = _data_file(destination, database_path)
+    if not database_path.exists():
+        raise typer.BadParameter(f"Database not found at {database_path}")
+    if destination_path.exists():
+        raise typer.BadParameter(f"Destination already exists: {destination_path}")
+    with sqlite3.connect(database_path) as source, sqlite3.connect(destination_path) as target:
+        source.backup(target)
+    console.print(f"Backup created: {destination_path}")
 
-    from irmscher_tracker.settings import get_settings
 
-    settings = get_settings()
-    db_path = settings.database_url.replace("sqlite+aiosqlite:///", "")
+@app.command("restore")
+def restore(source: str) -> None:
+    """Restore a SQLite backup while the server is stopped."""
+    database_path = _database_path(get_settings())
+    source_path = _data_file(source, database_path)
+    if not source_path.is_file():
+        raise typer.BadParameter(f"Backup not found: {source_path}")
+    if source_path == database_path:
+        raise typer.BadParameter("Backup and database paths must differ")
+    with sqlite3.connect(source_path) as backup_db, sqlite3.connect(database_path) as target:
+        backup_db.backup(target)
+    console.print(f"Database restored from: {source_path}")
 
-    if not os.path.exists(db_path):
-        console.print(f"[red]Database not found at {db_path}[/red]")
-        raise typer.Exit(1)
-
-    if os.path.exists(dest):
-        console.print(f"[red]Destination {dest} already exists[/red]")
-        raise typer.Exit(1)
-
-    try:
-        console.print(f"[yellow]Backing up database to {dest}...[/yellow]")
-        with sqlite3.connect(db_path) as conn:
-            conn.execute(f"VACUUM INTO '{dest}'")
-        console.print(f"[green]Backup successful: {dest}[/green]")
-    except Exception as e:
-        console.print(f"[red]Backup failed:[/red] {e}")
-        raise typer.Exit(1)
-
-db_app = typer.Typer(help="Database commands")
-app.add_typer(db_app, name="db")
 
 @db_app.command("upgrade")
 def db_upgrade() -> None:
     """Run database migrations."""
-    setup_logging()
-    import subprocess
     result = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
-        capture_output=True, text=True,
+        check=False,
     )
-    if result.stdout:
-        console.print(result.stdout)
-    if result.returncode != 0:
-        console.print(f"[red]Migration failed:[/red] {result.stderr}")
-        raise typer.Exit(code=1)
-    console.print("[green]Database upgraded successfully[/green]")
+    if result.returncode:
+        raise typer.Exit(code=result.returncode)
+
 
 @app.command("test-notification")
 def test_notification() -> None:
     """Send a test Telegram notification."""
-    setup_logging()
     from irmscher_tracker.notifications.telegram import TelegramNotifier
-    from irmscher_tracker.settings import get_settings
 
     settings = get_settings()
-    if not settings.telegram_bot_token or not settings.telegram_chat_id:
-        console.print("[red]Error: Telegram credentials not configured[/red]")
-        raise typer.Exit(code=1)
+    token = settings.telegram_bot_token.get_secret_value()
+    if not token or not settings.telegram_chat_id:
+        raise typer.BadParameter("Telegram credentials are not configured")
 
-    async def _test() -> bool:
-        notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
+    async def send() -> bool:
+        notifier = TelegramNotifier(token, settings.telegram_chat_id)
         try:
             return await notifier.send_test_message()
         finally:
             await notifier.close()
 
-    success = asyncio.run(_test())
-    if success:
-        console.print("[green]Test notification sent successfully![/green]")
-    else:
-        console.print("[red]Failed to send test notification[/red]")
+    if not asyncio.run(send()):
         raise typer.Exit(code=1)
+
 
 if __name__ == "__main__":
     app()

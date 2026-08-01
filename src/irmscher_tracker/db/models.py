@@ -8,6 +8,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 class Base(DeclarativeBase):
     pass
 
+
 class ListingRow(Base):
     __tablename__ = "listings"
 
@@ -17,7 +18,6 @@ class ListingRow(Base):
     title: Mapped[str] = mapped_column(sa.String)
     description: Mapped[str] = mapped_column(sa.Text)
     url: Mapped[str] = mapped_column(sa.String)
-    image_url: Mapped[str | None] = mapped_column(sa.String)
     image_urls_json: Mapped[str] = mapped_column(sa.Text, default="[]")
     price: Mapped[Decimal] = mapped_column(sa.Numeric(precision=12, scale=2))
     currency: Mapped[str] = mapped_column(sa.String)
@@ -26,7 +26,9 @@ class ListingRow(Base):
     seller: Mapped[str] = mapped_column(sa.String)
     seller_location: Mapped[str] = mapped_column(sa.String)
     published_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
-    first_seen_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), server_default=sa.func.now())
+    first_seen_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), server_default=sa.func.now()
+    )
     last_seen_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
     last_changed_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     inactive_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
@@ -38,6 +40,7 @@ class ListingRow(Base):
         sa.UniqueConstraint("source", "external_id", name="uq_listing_source_ext_id"),
     )
 
+
 class ListingQueryRow(Base):
     __tablename__ = "listing_queries"
 
@@ -45,12 +48,15 @@ class ListingQueryRow(Base):
     listing_id: Mapped[int] = mapped_column(sa.ForeignKey("listings.id"), index=True)
     source: Mapped[str] = mapped_column(sa.String, index=True)
     query: Mapped[str] = mapped_column(sa.String)
-    first_seen_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), server_default=sa.func.now())
+    first_seen_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), server_default=sa.func.now()
+    )
     last_seen_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
 
     __table_args__ = (
         sa.UniqueConstraint("listing_id", "source", "query", name="uq_listing_query"),
     )
+
 
 class ListingSnapshotRow(Base):
     __tablename__ = "listing_snapshots"
@@ -68,7 +74,10 @@ class ListingSnapshotRow(Base):
     seller: Mapped[str] = mapped_column(sa.String)
     seller_location: Mapped[str] = mapped_column(sa.String)
     image_urls_json: Mapped[str] = mapped_column(sa.Text)
-    captured_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True), server_default=sa.func.now())
+    captured_at: Mapped[datetime] = mapped_column(
+        sa.DateTime(timezone=True), server_default=sa.func.now()
+    )
+
 
 class PartMatchRow(Base):
     __tablename__ = "part_matches"
@@ -83,6 +92,9 @@ class PartMatchRow(Base):
     algorithm_version: Mapped[str] = mapped_column(sa.String)
     matched_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
 
+    __table_args__ = (sa.UniqueConstraint("listing_id", name="uq_match_listing"),)
+
+
 class NotificationRow(Base):
     __tablename__ = "notifications"
 
@@ -95,6 +107,7 @@ class NotificationRow(Base):
     sent_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
     success: Mapped[bool] = mapped_column(sa.Boolean)
     error_message: Mapped[str | None] = mapped_column(sa.String)
+
 
 class SearchRunRow(Base):
     __tablename__ = "search_runs"

@@ -7,6 +7,9 @@ factory functions.
 
 from __future__ import annotations
 
+from typing import Any
+
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -32,19 +35,16 @@ def get_engine(database_url: str) -> AsyncEngine:
         )
 
         if database_url.startswith("sqlite"):
-            import sqlite3
-
-            from sqlalchemy import event
 
             @event.listens_for(engine.sync_engine, "connect")
-            def _set_sqlite_pragma(dbapi_connection, connection_record):
-                if isinstance(dbapi_connection, sqlite3.Connection):
-                    cursor = dbapi_connection.cursor()
-                    cursor.execute("PRAGMA journal_mode=WAL")
-                    cursor.execute("PRAGMA synchronous=NORMAL")
-                    cursor.execute("PRAGMA foreign_keys=ON")
-                    cursor.execute("PRAGMA busy_timeout=10000")
-                    cursor.close()
+            def _set_sqlite_pragma(dbapi_connection: Any, connection_record: Any) -> None:
+                del connection_record
+                cursor = dbapi_connection.cursor()
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute("PRAGMA busy_timeout=10000")
+                cursor.close()
 
         _engines[database_url] = engine
     return _engines[database_url]
@@ -56,9 +56,7 @@ def get_session_factory(
     """Return (or create) a session factory bound to *database_url*."""
     if database_url not in _factories:
         engine = get_engine(database_url)
-        _factories[database_url] = async_sessionmaker(
-            engine, expire_on_commit=False
-        )
+        _factories[database_url] = async_sessionmaker(engine, expire_on_commit=False)
     return _factories[database_url]
 
 

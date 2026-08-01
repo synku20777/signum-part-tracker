@@ -6,15 +6,15 @@ Marketplace-specific structures are never exposed beyond their adapters.
 
 from __future__ import annotations
 
-import enum
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class Source(str, enum.Enum):
+class Source(StrEnum):
     """Supported marketplace data sources."""
 
     EBAY = "ebay"
@@ -24,7 +24,7 @@ class Source(str, enum.Enum):
     SSCOM = "sscom"
 
 
-class ListingCondition(str, enum.Enum):
+class ListingCondition(StrEnum):
     """Possible conditions of a listing item."""
 
     NEW = "new"
@@ -72,7 +72,7 @@ class MatchResult(BaseModel):
     algorithm_version: str = "1.0"
 
 
-class AlertType(str, enum.Enum):
+class AlertType(StrEnum):
     """Types of alerts the tracker can emit."""
 
     NEW_LISTING = "new_listing"
@@ -125,10 +125,37 @@ class PartsConfig(BaseModel):
     negative_rules: NegativeRules = Field(default_factory=NegativeRules)
 
 
+class SearchHit(BaseModel):
+    """One normalized listing and every query that discovered it."""
+
+    listing: NormalizedListing
+    queries: set[str] = Field(default_factory=set)
+
+
+class SourceSearchResult(BaseModel):
+    """Marketplace search output with completeness metadata."""
+
+    hits: list[SearchHit] = Field(default_factory=list)
+    successful_queries: list[str] = Field(default_factory=list)
+    query_errors: dict[str, str] = Field(default_factory=dict)
+    complete: bool = True
+
+
+class SearchRunStatus(StrEnum):
+    RUNNING = "running"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    FAILED = "failed"
+    INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
+
+
 class SearchRunResult(BaseModel):
     """Summary statistics for one search cycle."""
 
     source: Source
+    run_id: int | None = None
+    status: SearchRunStatus = SearchRunStatus.RUNNING
     total_found: int = 0
     new_listings: int = 0
     updated_listings: int = 0

@@ -7,6 +7,7 @@ from irmscher_tracker.notifications.telegram import TelegramNotifier
 
 logger = logging.getLogger(__name__)
 
+
 class AlertService:
     def __init__(self, notifier: TelegramNotifier | None = None):
         self._notifier = notifier

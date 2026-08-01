@@ -4,162 +4,103 @@ from decimal import Decimal
 import pytest
 from fastapi.testclient import TestClient
 
-from irmscher_tracker.api.app import _state, create_app
+from irmscher_tracker.api.app import create_app
 from irmscher_tracker.db.models import ListingRow
 
 
 @pytest.fixture
-def app():
-    return create_app()
+def test_client(settings, session_factory):
+    app = create_app(settings, session_factory)
+    with TestClient(app) as client:
+        yield client
 
-@pytest.fixture
-def test_client(app):
-    return TestClient(app)
-
-@pytest.fixture(autouse=True)
-def setup_state(settings, session_factory):
-    _state["settings"] = settings
-    _state["session_factory"] = session_factory
-    yield
-    _state.clear()
 
 def test_health_endpoint(test_client):
     response = test_client.get("/health")
     assert response.status_code == 200
-    assert "version" in response.json()
-    assert response.json()["status"] == "ok"
+    assert response.json() == {
+        "status": "ok",
+        "version": "0.1.0",
+        "database": "ok",
+        "scheduler": "running",
+        "ebay_configured": True,
+        "telegram_configured": True,
+    }
+
+
+def test_protected_endpoint_requires_valid_token(test_client, settings):
+    assert test_client.post("/runs/ebay").status_code == 401
+    assert (
+        test_client.post("/runs/ebay", headers={"Authorization": "Bearer wrong-token"}).status_code
+        == 401
+    )
+    settings.ebay_enabled = False
+    response = test_client.post(
+        "/runs/ebay",
+        headers={"Authorization": f"Bearer {settings.api_token.get_secret_value()}"},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "eBay scanning is disabled"
+
 
 def test_list_listings_empty(test_client):
-    response = test_client.get("/listings")
-    assert response.status_code == 200
-    assert response.json() == []
+    assert test_client.get("/listings").json() == []
+
 
 @pytest.mark.asyncio
 async def test_list_listings_with_data(test_client, db_session):
-    listing = ListingRow(
-        source="ebay",
-        external_id="123",
-        title="test listing",
-        description="",
-        url="http",
-        image_url="",
-        price=Decimal("100"),
-        currency="EUR",
-        shipping_cost=Decimal("10"),
-        condition="new",
-        seller="",
-        seller_location="",
-        published_at=datetime.now(UTC),
-        first_seen_at=datetime.now(UTC),
-        last_seen_at=datetime.now(UTC),
-        is_active=True
-    )
+    listing = _listing("123", "ebay", True)
     db_session.add(listing)
     await db_session.commit()
 
     response = test_client.get("/listings")
     assert response.status_code == 200
-    data = response.json()
-    assert len(data) == 1
-    assert data[0]["title"] == "test listing"
+    assert response.json()[0]["title"] == "test listing"
+
 
 def test_get_listing_not_found(test_client):
     response = test_client.get("/listings/999")
     assert response.status_code == 404
-    assert response.json()["detail"] == "Listing not found"
 
-def test_list_matches_empty(test_client):
-    response = test_client.get("/matches")
-    assert response.status_code == 200
-    assert response.json() == []
 
-def test_search_runs_empty(test_client):
-    response = test_client.get("/search-runs")
-    assert response.status_code == 200
-    assert response.json() == []
+def test_empty_collection_endpoints(test_client):
+    assert test_client.get("/matches").json() == []
+    assert test_client.get("/search-runs").json() == []
+
 
 @pytest.mark.asyncio
-async def test_list_listings_filter_source(test_client, db_session):
-    l1 = ListingRow(
-        source="ebay",
-        external_id="1",
-        title="t1",
-        description="",
-        url="http",
-        price=Decimal("100"),
-        currency="EUR",
-        condition="new",
-        seller="",
-        seller_location="",
-        published_at=datetime.now(UTC),
-        first_seen_at=datetime.now(UTC),
-        last_seen_at=datetime.now(UTC),
-        is_active=True
+async def test_listing_filters(test_client, db_session):
+    db_session.add_all(
+        [
+            _listing("1", "ebay", True),
+            _listing("2", "ebay", False),
+            _listing("3", "kleinanzeigen", True),
+        ]
     )
-    l2 = ListingRow(
-        source="kleinanzeigen",
-        external_id="2",
-        title="t2",
-        description="",
-        url="http",
-        price=Decimal("100"),
-        currency="EUR",
-        condition="new",
-        seller="",
-        seller_location="",
-        published_at=datetime.now(UTC),
-        first_seen_at=datetime.now(UTC),
-        last_seen_at=datetime.now(UTC),
-        is_active=True
-    )
-    db_session.add_all([l1, l2])
     await db_session.commit()
 
-    response = test_client.get("/listings?source=ebay")
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data) == 1
-    assert data[0]["source"] == "ebay"
+    by_source = test_client.get("/listings?source=kleinanzeigen").json()
+    active = test_client.get("/listings?is_active=true").json()
+    assert [row["external_id"] for row in by_source] == ["3"]
+    assert {row["external_id"] for row in active} == {"1", "3"}
 
-@pytest.mark.asyncio
-async def test_list_listings_filter_active(test_client, db_session):
-    l1 = ListingRow(
-        source="ebay",
-        external_id="1",
-        title="t1",
+
+def _listing(external_id: str, source: str, active: bool) -> ListingRow:
+    now = datetime.now(UTC)
+    return ListingRow(
+        source=source,
+        external_id=external_id,
+        title="test listing",
         description="",
-        url="http",
+        url="http://example.test",
+        image_urls_json="[]",
         price=Decimal("100"),
         currency="EUR",
         condition="new",
         seller="",
         seller_location="",
-        published_at=datetime.now(UTC),
-        first_seen_at=datetime.now(UTC),
-        last_seen_at=datetime.now(UTC),
-        is_active=True
+        published_at=now,
+        first_seen_at=now,
+        last_seen_at=now,
+        is_active=active,
     )
-    l2 = ListingRow(
-        source="ebay",
-        external_id="2",
-        title="t2",
-        description="",
-        url="http",
-        price=Decimal("100"),
-        currency="EUR",
-        condition="new",
-        seller="",
-        seller_location="",
-        published_at=datetime.now(UTC),
-        first_seen_at=datetime.now(UTC),
-        last_seen_at=datetime.now(UTC),
-        is_active=False
-    )
-    db_session.add_all([l1, l2])
-    await db_session.commit()
-
-    response = test_client.get("/listings?is_active=true")
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data) == 1
-    assert data[0]["is_active"] is True

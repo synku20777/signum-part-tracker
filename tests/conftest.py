@@ -15,6 +15,7 @@ from irmscher_tracker.settings import Settings
 @pytest.fixture
 def settings():
     return Settings(
+        api_token="test-api-token-test-api-token-123456",
         database_url="sqlite+aiosqlite:///:memory:",
         ebay_client_id="dummy_id",
         ebay_client_secret="dummy_secret",
@@ -23,7 +24,9 @@ def settings():
         minimum_match_score=50,
         price_drop_percent=Decimal("5.0"),
         config_directory="config",
+        scan_on_startup=False,
     )
+
 
 @pytest_asyncio.fixture
 async def db_engine():
@@ -33,15 +36,18 @@ async def db_engine():
     yield engine
     await engine.dispose()
 
+
 @pytest_asyncio.fixture
 async def session_factory(db_engine):
     return async_sessionmaker(db_engine, expire_on_commit=False, class_=AsyncSession)
+
 
 @pytest_asyncio.fixture
 async def db_session(session_factory):
     async with session_factory() as session:
         yield session
         await session.rollback()
+
 
 @pytest.fixture
 def sample_listing():
@@ -57,9 +63,11 @@ def sample_listing():
         published_at=datetime.now(UTC),
     )
 
+
 @pytest.fixture
 def parts_config_path():
-    return Path("c:/Users/nesto/Documents/Code/Dawn-SaHelix-Custom/signum-part-tracker/config/parts.yaml")
+    return Path(__file__).resolve().parents[1] / "config" / "parts.yaml"
+
 
 @pytest.fixture
 def matcher(parts_config_path):

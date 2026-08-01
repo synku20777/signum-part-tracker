@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import abc
 
-from irmscher_tracker.domain import NormalizedListing, Source
+from irmscher_tracker.domain import Source, SourceSearchResult
 
 
 class SourceAdapter(abc.ABC):
@@ -14,7 +14,7 @@ class SourceAdapter(abc.ABC):
         """Return the source identifier."""
 
     @abc.abstractmethod
-    async def search(self, queries: list[str]) -> list[NormalizedListing]:
+    async def search(self, queries: list[str]) -> SourceSearchResult:
         """Search the marketplace with the given queries and return normalized listings."""
 
     @abc.abstractmethod

@@ -2,13 +2,19 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel
 
 
 class HealthResponse(BaseModel):
-    status: str = "ok"
+    status: Literal["ok", "degraded"]
     version: str
+    database: Literal["ok", "error"]
+    scheduler: Literal["running", "stopped"]
+    ebay_configured: bool
+    telegram_configured: bool
+
 
 class ListingResponse(BaseModel):
     id: int
@@ -32,6 +38,7 @@ class ListingResponse(BaseModel):
     consecutive_misses: int
     is_active: bool
 
+
 class MatchResponse(BaseModel):
     id: int
     listing_id: int
@@ -42,10 +49,7 @@ class MatchResponse(BaseModel):
     reasons_json: str
     algorithm_version: str
     matched_at: datetime
-    # Include listing info
-    listing_title: str | None = None
-    listing_url: str | None = None
-    listing_price: Decimal | None = None
+
 
 class SearchRunResponse(BaseModel):
     id: int
@@ -59,16 +63,12 @@ class SearchRunResponse(BaseModel):
     alerts_sent: int
     status: str
 
+
 class RunTriggerResponse(BaseModel):
+    search_run_id: int
     status: str
     message: str
     total_found: int = 0
     new_listings: int = 0
     matches_found: int = 0
     alerts_sent: int = 0
-
-class PaginatedResponse(BaseModel):
-    items: list
-    total: int
-    limit: int
-    offset: int

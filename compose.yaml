@@ -3,15 +3,16 @@ services:
     build: .
     image: irmscher-tracker:latest
     container_name: irmscher-tracker
+    init: true
     restart: unless-stopped
     ports:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      - ./config/parts.yaml:/app/config/parts.yaml
+      - ./config:/app/config:ro
     env_file:
       - .env
     environment:
-      # Explicitly override path to ensure it points to the mounted volume
-      - TRACKER_DATABASE_URL=sqlite+aiosqlite:////app/data/tracker.db
-      - TRACKER_PARTS_CONFIG_PATH=/app/config/parts.yaml
+      TRACKER_DATABASE_URL: sqlite+aiosqlite:////app/data/tracker.db
+      TRACKER_CONFIG_DIRECTORY: /app/config
+    stop_grace_period: 30s
