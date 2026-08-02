@@ -11,7 +11,7 @@ sellers, use marketplace logins, or collect seller contact details.
 ## Requirements
 
 - Docker Desktop or Docker Engine with Compose
-- eBay Browse API credentials only when eBay is enabled
+- eBay application credentials and deletion-compliance callback when Production eBay is enabled
 - Optional Telegram bot token and chat ID
 
 ## First start
@@ -47,9 +47,13 @@ All environment variables use the `TRACKER_` prefix.
 |---|---:|---|
 | `TRACKER_API_TOKEN` | generated | Bearer token for scan requests |
 | `TRACKER_DATABASE_URL` | `/app/data/tracker.db` | SQLite database URL |
-| `TRACKER_EBAY_ENABLED` | `true` | Enable eBay |
+| `TRACKER_EBAY_ENABLED` | `false` | Enable eBay |
+| `TRACKER_EBAY_ENVIRONMENT` | `production` | `sandbox` or `production` API endpoints |
 | `TRACKER_EBAY_CLIENT_ID` | empty | eBay Browse API client ID |
 | `TRACKER_EBAY_CLIENT_SECRET` | empty | eBay Browse API secret |
+| `TRACKER_EBAY_DELETION_ENDPOINT_URL` | empty | Exact public deletion callback URL |
+| `TRACKER_EBAY_DELETION_VERIFICATION_TOKEN` | empty | Secret 32–80 character callback token |
+| `TRACKER_EBAY_DELETION_MAX_PENDING_HOURS` | `24` | Maximum healthy deletion-processing age |
 | `TRACKER_SEARCH_INTERVAL_MINUTES` | `30` | eBay schedule interval |
 | `TRACKER_SSCOM_ENABLED` | `false` | Enable SS.com |
 | `TRACKER_SSCOM_INTERVAL_MINUTES` | `60` | SS.com schedule interval |
@@ -115,11 +119,55 @@ restarts only after success.
 - `GET /search-runs/{id}` returns one run for polling.
 - `POST /runs/{source}` requires `Authorization: Bearer <token>` and returns
   HTTP 202 with a running search-run ID.
+- `GET` and `POST /ebay/marketplace-account-deletion` are public eBay callback
+  methods and intentionally do not use the tracker bearer token.
 
 Manual and scheduled scans share one lock per source. An overlap returns HTTP
 409 with the active run ID. Feed discovery completeness controls misses;
 detail-enrichment failures make a run partial without hiding listings observed
 in complete feeds.
+
+## eBay Production compliance
+
+Production eBay access requires Marketplace Account Deletion notifications.
+Expose this exact application route through an HTTPS reverse proxy:
+
+```text
+https://tracker.example.com/ebay/marketplace-account-deletion
+```
+
+Set the identical URL in `TRACKER_EBAY_DELETION_ENDPOINT_URL` and in the eBay
+developer portal. Generate a 32–80 character token containing only letters,
+digits, `_`, or `-`, store it in
+`TRACKER_EBAY_DELETION_VERIFICATION_TOKEN`, and enter the same value in the
+portal. The URL text must match exactly because it participates in eBay's
+challenge hash. Production configuration rejects HTTP, localhost, and literal
+non-public IP addresses.
+
+The GET callback returns eBay's SHA-256 challenge response. The POST callback
+validates the JSON, verifies `X-EBAY-SIGNATURE` with eBay's environment-specific
+public key, durably reserves the notification, and returns `204`. Invalid
+signatures return `412`; temporary OAuth or key failures return `503` so eBay
+can retry. The callback is not protected by `TRACKER_API_TOKEN`.
+
+An application-owned worker anonymizes matching seller identity, feedback, and
+location in listings, snapshots, source metadata, and stored alert payloads.
+Temporary deletion identifiers are erased after processing. Historical
+listings marked as anonymized cannot regain seller data on later scans; the
+tracker does not retain a seller-wide tombstone for hypothetical new listings.
+
+For local Sandbox testing, use:
+
+```dotenv
+TRACKER_EBAY_ENVIRONMENT=sandbox
+TRACKER_EBAY_ENABLED=true
+TRACKER_EBAY_DELETION_ENDPOINT_URL=http://localhost:8000/ebay/marketplace-account-deletion
+TRACKER_EBAY_DELETION_VERIFICATION_TOKEN=replace_with_32_to_80_safe_characters
+```
+
+Local HTTP verifies challenge behavior only. eBay portal test notifications
+still require a publicly reachable HTTPS endpoint. Use the portal's **Send Test
+Notification** action after the challenge succeeds.
 
 ## SS.com behavior and limits
 
@@ -149,7 +197,9 @@ docker compose config
 
 - Container exits: inspect `docker compose logs`; migrations or required core
   settings failed before Uvicorn started.
-- `/health` returns 503: the database failed or a scheduler task stopped.
+- `/health` returns 503: the database failed, a scheduler/deletion worker
+  stopped, Production eBay lacks a ready deletion callback, or deletion work is
+  older than the configured threshold.
 - Scan returns 400: the source is disabled, unconfigured, or unsupported.
 - Scan returns 409: that source already has an active run.
 - SS.com run is partial: inspect `/search-runs/{id}` and logs for a failed feed,

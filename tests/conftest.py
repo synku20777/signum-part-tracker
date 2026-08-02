@@ -10,6 +10,7 @@ from irmscher_tracker.db.models import Base
 from irmscher_tracker.domain import ListingCondition, NormalizedListing, Source
 from irmscher_tracker.matcher import PartMatcher
 from irmscher_tracker.settings import Settings
+from irmscher_tracker.sources.ebay_client import EbayEnvironment
 
 
 @pytest.fixture
@@ -18,6 +19,7 @@ def settings():
         api_token="test-api-token-test-api-token-123456",
         database_url="sqlite+aiosqlite:///:memory:",
         ebay_enabled=True,
+        ebay_environment=EbayEnvironment.SANDBOX,
         ebay_client_id="dummy_id",
         ebay_client_secret="dummy_secret",
         sscom_enabled=False,

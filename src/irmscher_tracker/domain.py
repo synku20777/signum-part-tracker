@@ -47,7 +47,11 @@ class NormalizedListing(BaseModel):
     currency: str = "EUR"
     shipping_cost: Decimal | None = None
     condition: ListingCondition = ListingCondition.UNKNOWN
-    seller: str = ""
+    seller_display: str = ""
+    seller_identifier: str = ""
+    seller_identifier_type: str = ""
+    seller_feedback_score: int | None = None
+    seller_feedback_percentage: Decimal | None = None
     seller_location: str = ""
     published_at: datetime | None = None
     source_metadata: dict[str, Any] = Field(default_factory=dict, exclude=True)

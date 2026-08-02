@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from irmscher_tracker.db.models import (
+    EbayDeletionNotificationRow,
     ListingQueryRow,
     ListingRow,
     ListingSnapshotRow,
@@ -30,6 +31,50 @@ from irmscher_tracker.domain import (
     SearchRunResult,
     SearchRunStatus,
 )
+
+
+def _canonical_decimal(value: Decimal | None) -> str | None:
+    return str(value.quantize(Decimal("0.01"))) if value is not None else None
+
+
+def snapshot_payload_hash(
+    *,
+    title: str,
+    description: str,
+    price: Decimal | None,
+    currency: str,
+    shipping_cost: Decimal | None,
+    condition: str,
+    seller_display: str,
+    seller_identifier: str | None,
+    seller_identifier_type: str | None,
+    seller_feedback_score: int | None,
+    seller_feedback_percentage: Decimal | None,
+    seller_location: str,
+    image_urls: list[str],
+    url: str,
+) -> str:
+    import re
+
+    payload = {
+        "schema_version": 2,
+        "title": re.sub(r"\s+", " ", title.strip()),
+        "description": re.sub(r"\s+", " ", description.strip()),
+        "price": _canonical_decimal(price),
+        "currency": currency.upper(),
+        "shipping_cost": _canonical_decimal(shipping_cost),
+        "condition": condition,
+        "seller_display": seller_display.strip(),
+        "seller_identifier": (seller_identifier or "").strip(),
+        "seller_identifier_type": (seller_identifier_type or "").strip(),
+        "seller_feedback_score": seller_feedback_score,
+        "seller_feedback_percentage": _canonical_decimal(seller_feedback_percentage),
+        "seller_location": seller_location.strip(),
+        "image_urls": sorted(image_urls),
+        "url": url.strip(),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()
 
 
 class ListingRepository:
@@ -67,6 +112,13 @@ class ListingRepository:
         if existing is not None:
             previous_price = existing.price
             was_active = existing.is_active
+            if existing.seller_anonymized_at is not None:
+                listing.seller_display = ""
+                listing.seller_identifier = ""
+                listing.seller_identifier_type = ""
+                listing.seller_feedback_score = None
+                listing.seller_feedback_percentage = None
+                listing.seller_location = ""
             existing.title = listing.title
             existing.description = listing.description
             existing.url = listing.url
@@ -75,8 +127,13 @@ class ListingRepository:
             existing.currency = listing.currency
             existing.shipping_cost = listing.shipping_cost
             existing.condition = condition_str
-            existing.seller = listing.seller
-            existing.seller_location = listing.seller_location
+            if existing.seller_anonymized_at is None:
+                existing.seller_display = listing.seller_display
+                existing.seller_identifier = listing.seller_identifier or None
+                existing.seller_identifier_type = listing.seller_identifier_type or None
+                existing.seller_feedback_score = listing.seller_feedback_score
+                existing.seller_feedback_percentage = listing.seller_feedback_percentage
+                existing.seller_location = listing.seller_location
             existing.published_at = listing.published_at or existing.published_at
             existing.last_seen_at = now
             existing.consecutive_misses = 0
@@ -104,7 +161,11 @@ class ListingRepository:
             currency=listing.currency,
             shipping_cost=listing.shipping_cost,
             condition=condition_str,
-            seller=listing.seller,
+            seller_display=listing.seller_display,
+            seller_identifier=listing.seller_identifier or None,
+            seller_identifier_type=listing.seller_identifier_type or None,
+            seller_feedback_score=listing.seller_feedback_score,
+            seller_feedback_percentage=listing.seller_feedback_percentage,
             seller_location=listing.seller_location,
             published_at=listing.published_at or now,
             last_seen_at=now,
@@ -224,39 +285,29 @@ class SnapshotRepository:
         latest = await self.get_latest(session, listing_id)
         condition_str = listing.condition.value
 
-        def canonical_decimal(value: Decimal | None) -> str | None:
-            return str(value.quantize(Decimal("0.01"))) if value is not None else None
-
-        import re
-
-        canonical_url = listing.url.strip()
-        # normalize whitespace
-        canonical_title = re.sub(r"\s+", " ", listing.title.strip())
-        canonical_desc = re.sub(r"\s+", " ", listing.description.strip())
-
-        snapshot_payload = {
-            "schema_version": 1,
-            "title": canonical_title,
-            "description": canonical_desc,
-            "price": canonical_decimal(listing.price),
-            "currency": listing.currency.upper(),
-            "shipping_cost": canonical_decimal(listing.shipping_cost),
-            "condition": condition_str,
-            "seller": listing.seller.strip(),
-            "seller_location": listing.seller_location.strip(),
-            "image_urls": sorted(listing.image_urls) if listing.image_urls else [],
-            "url": canonical_url,
-        }
-
-        payload_json = json.dumps(snapshot_payload, sort_keys=True, separators=(",", ":"))
-        payload_hash = hashlib.sha256(payload_json.encode()).hexdigest()
+        payload_hash = snapshot_payload_hash(
+            title=listing.title,
+            description=listing.description,
+            price=listing.price,
+            currency=listing.currency,
+            shipping_cost=listing.shipping_cost,
+            condition=condition_str,
+            seller_display=listing.seller_display,
+            seller_identifier=listing.seller_identifier,
+            seller_identifier_type=listing.seller_identifier_type,
+            seller_feedback_score=listing.seller_feedback_score,
+            seller_feedback_percentage=listing.seller_feedback_percentage,
+            seller_location=listing.seller_location,
+            image_urls=listing.image_urls,
+            url=listing.url,
+        )
 
         if latest is not None and latest.payload_hash == payload_hash:
             return None
 
         snapshot = ListingSnapshotRow(
             listing_id=listing_id,
-            schema_version=1,
+            schema_version=2,
             payload_hash=payload_hash,
             title=listing.title,
             description=listing.description,
@@ -264,7 +315,11 @@ class SnapshotRepository:
             currency=listing.currency,
             shipping_cost=listing.shipping_cost,
             condition=condition_str,
-            seller=listing.seller,
+            seller_display=listing.seller_display,
+            seller_identifier=listing.seller_identifier or None,
+            seller_identifier_type=listing.seller_identifier_type or None,
+            seller_feedback_score=listing.seller_feedback_score,
+            seller_feedback_percentage=listing.seller_feedback_percentage,
             seller_location=listing.seller_location,
             image_urls_json=json.dumps(listing.image_urls),
         )
@@ -371,8 +426,9 @@ class NotificationRepository:
         )
 
         result = await session.execute(stmt)
-        await session.flush()
         notification_id = result.scalar_one_or_none()
+        result.close()
+        await session.flush()
         if notification_id is None:
             return None
         return await session.get(NotificationRow, notification_id)
@@ -412,6 +468,272 @@ class NotificationRepository:
         )
         result = await session.execute(stmt)
         return list(result.scalars().all())
+
+
+_SELLER_KEYS = {
+    "seller",
+    "sellerdisplay",
+    "selleridentifier",
+    "sellerlocation",
+    "username",
+    "userid",
+    "eiastoken",
+}
+
+
+def _scrub_json(value: object, identifiers: set[str]) -> object:
+    if isinstance(value, dict):
+        result: dict[str, object] = {}
+        for key, item in value.items():
+            normalized_key = key.replace("_", "").casefold()
+            sensitive = normalized_key in _SELLER_KEYS or normalized_key.startswith("seller")
+            result[key] = "" if sensitive else _scrub_json(item, identifiers)
+        return result
+    if isinstance(value, list):
+        return [_scrub_json(item, identifiers) for item in value]
+    if isinstance(value, str) and _seller_matches(value, identifiers):
+        return ""
+    return value
+
+
+def _scrub_json_text(value: str, identifiers: set[str]) -> str:
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return "{}"
+    return json.dumps(_scrub_json(parsed, identifiers), ensure_ascii=False, separators=(",", ":"))
+
+
+def _seller_matches(value: str | None, identifiers: set[str]) -> bool:
+    candidate = (value or "").strip().casefold()
+    return candidate in identifiers or any(
+        candidate.startswith(f"{identifier} (") for identifier in identifiers
+    )
+
+
+def _stored_seller_matches(
+    display: str | None,
+    identifier: str | None,
+    identifier_type: str | None,
+    deletion: EbayDeletionNotificationRow,
+) -> bool:
+    stored = (identifier or "").strip().casefold()
+    user_id = (deletion.user_id or "").strip().casefold()
+    username = (deletion.username or "").strip().casefold()
+    eias_token = (deletion.eias_token or "").strip().casefold()
+    if identifier_type == "user_id" and user_id and stored == user_id:
+        return True
+    if stored and ((user_id and stored == user_id) or (username and stored == username)):
+        return True
+    if _seller_matches(display, {value for value in (user_id, username) if value}):
+        return True
+    return identifier_type == "eias_token" and bool(eias_token) and stored == eias_token
+
+
+class EbayDeletionRepository:
+    async def reserve(
+        self,
+        session: AsyncSession,
+        *,
+        notification_id: str,
+        username: str | None,
+        user_id: str | None,
+        eias_token: str | None,
+    ) -> bool:
+        now = datetime.now(UTC)
+        result = await session.execute(
+            insert(EbayDeletionNotificationRow)
+            .values(
+                notification_id=notification_id,
+                username=username,
+                user_id=user_id,
+                eias_token=eias_token,
+                status="pending",
+                received_at=now,
+                attempt_count=0,
+            )
+            .on_conflict_do_nothing(index_elements=["notification_id"])
+            .returning(EbayDeletionNotificationRow.id)
+        )
+        inserted = result.scalar_one_or_none() is not None
+        result.close()
+        return inserted
+
+    async def recover_expired(self, session: AsyncSession) -> None:
+        now = datetime.now(UTC)
+        await session.execute(
+            update(EbayDeletionNotificationRow)
+            .where(
+                EbayDeletionNotificationRow.status == "processing",
+                EbayDeletionNotificationRow.lease_expires_at <= now,
+            )
+            .values(status="pending", lease_expires_at=None, next_attempt_at=now)
+        )
+
+    async def claim_next(self, session: AsyncSession) -> EbayDeletionNotificationRow | None:
+        now = datetime.now(UTC)
+        candidate = (
+            select(EbayDeletionNotificationRow.id)
+            .where(
+                EbayDeletionNotificationRow.status == "pending",
+                or_(
+                    EbayDeletionNotificationRow.next_attempt_at.is_(None),
+                    EbayDeletionNotificationRow.next_attempt_at <= now,
+                ),
+            )
+            .order_by(EbayDeletionNotificationRow.received_at)
+            .limit(1)
+            .scalar_subquery()
+        )
+        result = await session.execute(
+            update(EbayDeletionNotificationRow)
+            .where(
+                EbayDeletionNotificationRow.id == candidate,
+                EbayDeletionNotificationRow.status == "pending",
+            )
+            .values(
+                status="processing",
+                attempt_count=EbayDeletionNotificationRow.attempt_count + 1,
+                last_attempt_at=now,
+                lease_expires_at=now + timedelta(minutes=5),
+                last_error_code=None,
+            )
+            .returning(EbayDeletionNotificationRow.id)
+        )
+        row_id = result.scalar_one_or_none()
+        result.close()
+        if row_id is None:
+            return None
+        return await session.get(EbayDeletionNotificationRow, row_id)
+
+    async def anonymize(self, session: AsyncSession, row: EbayDeletionNotificationRow) -> None:
+        identifiers = {
+            value.strip().casefold()
+            for value in (row.user_id, row.username, row.eias_token)
+            if value and value.strip()
+        }
+        if not identifiers:
+            return
+        listings = list(
+            (
+                await session.execute(select(ListingRow).where(ListingRow.source == "ebay"))
+            ).scalars()
+        )
+        for listing in listings:
+            snapshots = list(
+                (
+                    await session.execute(
+                        select(ListingSnapshotRow).where(
+                            ListingSnapshotRow.listing_id == listing.id
+                        )
+                    )
+                ).scalars()
+            )
+            matched = _stored_seller_matches(
+                listing.seller_display,
+                listing.seller_identifier,
+                listing.seller_identifier_type,
+                row,
+            )
+            if not matched:
+                matched = any(
+                    _stored_seller_matches(
+                        snapshot.seller_display,
+                        snapshot.seller_identifier,
+                        snapshot.seller_identifier_type,
+                        row,
+                    )
+                    for snapshot in snapshots
+                )
+            if not matched:
+                continue
+
+            listing.seller_display = ""
+            listing.seller_identifier = None
+            listing.seller_identifier_type = None
+            listing.seller_feedback_score = None
+            listing.seller_feedback_percentage = None
+            listing.seller_location = ""
+            listing.seller_anonymized_at = datetime.now(UTC)
+            listing.source_metadata_json = _scrub_json_text(
+                listing.source_metadata_json, identifiers
+            )
+            for snapshot in snapshots:
+                snapshot.seller_display = ""
+                snapshot.seller_identifier = None
+                snapshot.seller_identifier_type = None
+                snapshot.seller_feedback_score = None
+                snapshot.seller_feedback_percentage = None
+                snapshot.seller_location = ""
+                try:
+                    images = json.loads(snapshot.image_urls_json or "[]")
+                except json.JSONDecodeError:
+                    images = []
+                snapshot.payload_hash = snapshot_payload_hash(
+                    title=snapshot.title,
+                    description=snapshot.description,
+                    price=snapshot.price,
+                    currency=snapshot.currency,
+                    shipping_cost=snapshot.shipping_cost,
+                    condition=snapshot.condition,
+                    seller_display="",
+                    seller_identifier=None,
+                    seller_identifier_type=None,
+                    seller_feedback_score=None,
+                    seller_feedback_percentage=None,
+                    seller_location="",
+                    image_urls=images,
+                    url=listing.url,
+                )
+                snapshot.schema_version = 2
+            notifications = list(
+                (
+                    await session.execute(
+                        select(NotificationRow).where(NotificationRow.listing_id == listing.id)
+                    )
+                ).scalars()
+            )
+            for notification in notifications:
+                notification.payload_json = _scrub_json_text(
+                    notification.payload_json, identifiers
+                )
+
+    async def mark_processed(
+        self, session: AsyncSession, row: EbayDeletionNotificationRow
+    ) -> None:
+        row.username = None
+        row.user_id = None
+        row.eias_token = None
+        row.status = "processed"
+        row.processed_at = datetime.now(UTC)
+        row.next_attempt_at = None
+        row.lease_expires_at = None
+        row.last_error_code = None
+
+    async def retry(
+        self, session: AsyncSession, row: EbayDeletionNotificationRow, error_code: str
+    ) -> None:
+        exponent = min(max(row.attempt_count - 1, 0), 10)
+        delay = min(5 * (2**exponent), 3600)
+        row.status = "pending"
+        row.next_attempt_at = datetime.now(UTC) + timedelta(seconds=delay)
+        row.lease_expires_at = None
+        row.last_error_code = error_code
+
+    async def pending_stats(self, session: AsyncSession) -> tuple[int, float | None]:
+        now = datetime.now(UTC)
+        result = await session.execute(
+            select(
+                func.count(EbayDeletionNotificationRow.id),
+                func.min(EbayDeletionNotificationRow.received_at),
+            ).where(EbayDeletionNotificationRow.status != "processed")
+        )
+        count, oldest = result.one()
+        if oldest is None:
+            return int(count), None
+        if oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=UTC)
+        return int(count), max((now - oldest).total_seconds(), 0.0)
 
 
 class SearchRunRepository:

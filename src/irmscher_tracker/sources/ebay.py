@@ -7,9 +7,7 @@ stay inside this module.
 
 from __future__ import annotations
 
-import base64
 import logging
-import time
 from contextlib import suppress
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -31,12 +29,17 @@ from irmscher_tracker.domain import (
     SourceSearchResult,
 )
 from irmscher_tracker.sources.base import SourceAdapter
+from irmscher_tracker.sources.ebay_client import (
+    EBAY_ENDPOINTS,
+    EbayApplicationTokenProvider,
+    EbayAuthError,
+    EbayEnvironment,
+)
 
 logger = logging.getLogger(__name__)
 
-EBAY_AUTH_URL = "https://api.ebay.com/identity/v1/oauth2/token"
-EBAY_SEARCH_URL = "https://api.ebay.com/buy/browse/v1/item_summary/search"
-EBAY_SCOPE = "https://api.ebay.com/oauth/api_scope"
+EBAY_AUTH_URL = EBAY_ENDPOINTS[EbayEnvironment.PRODUCTION].oauth_url
+EBAY_SEARCH_URL = EBAY_ENDPOINTS[EbayEnvironment.PRODUCTION].browse_search_url
 
 # Map eBay condition strings/IDs to our enum.
 _CONDITION_MAP: dict[str, ListingCondition] = {
@@ -63,10 +66,6 @@ _CONDITION_MAP: dict[str, ListingCondition] = {
 }
 
 
-class EbayAuthError(Exception):
-    """Raised when eBay authentication fails."""
-
-
 class EbayApiError(Exception):
     """Raised on non-retryable eBay API errors."""
 
@@ -89,14 +88,17 @@ class EbayAdapter(SourceAdapter):
         marketplace_id: str = "EBAY_DE",
         timeout: float = 30.0,
         max_results_per_query: int = 200,
+        environment: EbayEnvironment = EbayEnvironment.PRODUCTION,
+        token_provider: EbayApplicationTokenProvider | None = None,
     ) -> None:
-        self._client_id = client_id
-        self._client_secret = client_secret
         self._marketplace_id = marketplace_id
         self._max_results_per_query = max_results_per_query
+        self._endpoints = EBAY_ENDPOINTS[environment]
         self._client = httpx.AsyncClient(timeout=timeout)
-        self._token: str | None = None
-        self._token_expires_at = 0.0
+        self._owns_token_provider = token_provider is None
+        self._token_provider = token_provider or EbayApplicationTokenProvider(
+            client_id, client_secret, environment, timeout
+        )
 
     # -- SourceAdapter interface ----------------------------------------
 
@@ -142,42 +144,13 @@ class EbayAdapter(SourceAdapter):
     async def close(self) -> None:
         """Shut down the underlying HTTP client."""
         await self._client.aclose()
+        if self._owns_token_provider:
+            await self._token_provider.close()
 
     # -- Authentication -------------------------------------------------
 
-    async def _authenticate(self) -> str:
-        """Obtain an OAuth token via client-credentials grant."""
-        logger.info("Authenticating with eBay API")
-        credentials = f"{self._client_id}:{self._client_secret}"
-        encoded = base64.b64encode(credentials.encode()).decode()
-
-        response = await self._client.post(
-            EBAY_AUTH_URL,
-            headers={
-                "Authorization": f"Basic {encoded}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            },
-            data={
-                "grant_type": "client_credentials",
-                "scope": EBAY_SCOPE,
-            },
-        )
-
-        if response.status_code == 401:
-            raise EbayAuthError("Invalid eBay client credentials")
-        response.raise_for_status()
-
-        data = response.json()
-        token: str = data["access_token"]
-        expires_in = max(int(data.get("expires_in", 7200)), 0)
-        self._token_expires_at = time.monotonic() + max(expires_in - 60, 0)
-        return token
-
     async def _get_token(self) -> str:
-        """Return a cached token, or authenticate first."""
-        if self._token is None or time.monotonic() >= self._token_expires_at:
-            self._token = await self._authenticate()
-        return self._token
+        return await self._token_provider.get_token()
 
     # -- Search ---------------------------------------------------------
 
@@ -206,7 +179,7 @@ class EbayAdapter(SourceAdapter):
             }
 
             response = await self._client.get(
-                EBAY_SEARCH_URL,
+                self._endpoints.browse_search_url,
                 headers=headers,
                 params=params,
             )
@@ -214,10 +187,10 @@ class EbayAdapter(SourceAdapter):
             # Handle token expiry transparently.
             if response.status_code == 401:
                 logger.warning("eBay token expired, re-authenticating")
-                self._token = await self._authenticate()
-                headers["Authorization"] = f"Bearer {self._token}"
+                await self._token_provider.invalidate()
+                headers["Authorization"] = f"Bearer {await self._get_token()}"
                 response = await self._client.get(
-                    EBAY_SEARCH_URL,
+                    self._endpoints.browse_search_url,
                     headers=headers,
                     params=params,
                 )
@@ -305,6 +278,12 @@ class EbayAdapter(SourceAdapter):
             seller_info = f"{seller_username} ({feedback_score}, {feedback_percentage}%)"
 
         seller = seller_info
+        normalized_feedback_percentage: Decimal | None = None
+        if isinstance(feedback_percentage, int | float | str):
+            with suppress(InvalidOperation, ValueError):
+                candidate = Decimal(str(feedback_percentage))
+                if candidate.is_finite():
+                    normalized_feedback_percentage = candidate
 
         # Location
         location_data = item.get("itemLocation", {})
@@ -326,7 +305,13 @@ class EbayAdapter(SourceAdapter):
             currency=currency,
             shipping_cost=shipping_cost,
             condition=condition,
-            seller=seller,
+            seller_display=seller,
+            seller_identifier=seller_username,
+            seller_identifier_type="username_or_user_id" if seller_username else "",
+            seller_feedback_score=(
+                int(feedback_score) if isinstance(feedback_score, int | float) else None
+            ),
+            seller_feedback_percentage=normalized_feedback_percentage,
             seller_location=seller_location,
             published_at=datetime.now(UTC),
         )

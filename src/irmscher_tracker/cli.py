@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 from irmscher_tracker.settings import Settings, get_settings
+from irmscher_tracker.sources.ebay_client import EbayEnvironment
 from irmscher_tracker.sources.sscom import load_feed_urls
 
 app = typer.Typer(name="tracker", help="Irmscher Parts Tracker CLI")
@@ -128,10 +129,12 @@ def doctor() -> None:
             settings.telegram_bot_token.get_secret_value() and settings.telegram_chat_id
         ),
     }
+    health_payload: dict[str, object] = {}
     try:
         response = httpx.get(f"http://127.0.0.1:{settings.api_port}/health", timeout=5.0)
         checks["API"] = response.status_code == 200
-    except httpx.RequestError:
+        health_payload = response.json()
+    except (httpx.RequestError, ValueError):
         checks["API"] = False
     source_states = {
         "eBay": (settings.ebay_enabled, ebay_configured),
@@ -145,13 +148,31 @@ def doctor() -> None:
             f"configured={'yes' if configured else 'no'}, "
             f"ready={'yes' if enabled and configured else 'no'}"
         )
+    deletion_configured = settings.ebay_deletion_callback_configured
+    deletion_locally_ready = settings.ebay_deletion_callback_ready
+    deletion_worker = str(health_payload.get("ebay_deletion_worker", "unknown"))
+    deletion_pending = health_payload.get("ebay_deletion_pending", "unknown")
+    deletion_oldest = health_payload.get("ebay_deletion_oldest_pending_seconds")
+    console.print(
+        "eBay deletion callback: "
+        f"environment={settings.ebay_environment.value}, "
+        f"configured={'yes' if deletion_configured else 'no'}, "
+        f"ready={'yes' if deletion_locally_ready and deletion_worker == 'running' else 'no'}, "
+        f"worker={deletion_worker}, pending={deletion_pending}, "
+        f"oldest_pending_seconds={deletion_oldest}"
+    )
     core_ready = all(
         checks[name] for name in ("database", "parts config", "sources config", "API")
     )
     sources_ready = all(
         not enabled or configured for enabled, configured in source_states.values()
     )
-    if not core_ready or not sources_ready:
+    deletion_ready = not (
+        settings.ebay_enabled
+        and settings.ebay_environment is EbayEnvironment.PRODUCTION
+        and (not deletion_locally_ready or deletion_worker != "running")
+    )
+    if not core_ready or not sources_ready or not deletion_ready:
         raise typer.Exit(code=1)
 
 

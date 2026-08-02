@@ -1,0 +1,28 @@
+{
+  "payload": {
+    "metadata": {
+      "topic": "MARKETPLACE_ACCOUNT_DELETION",
+      "schemaVersion": "1.0",
+      "deprecated": false
+    },
+    "notification": {
+      "notificationId": "golden-notification-001",
+      "eventDate": "2026-08-02T10:00:00.000Z",
+      "publishDate": "2026-08-02T10:00:01.000Z",
+      "publishAttemptCount": 1,
+      "data": {
+        "username": "golden_seller",
+        "userId": "golden-user-id",
+        "eiasToken": "golden-eias-token"
+      }
+    }
+  },
+  "signatureHeader": "eyJraWQiOiJnb2xkZW4ta2V5LTAwMSIsInNpZ25hdHVyZSI6Ik1FWUNJUUNZK1liOENFK2FiYzQ0UitWUUxSbkxuUW1mV1VVMjVEUEUxUHdHYlRpTXVRSWhBSThkTkxuMXZrUlhHT242L0dDVSs0YmJlWWxzb3pTL3grVFF3VUF4SDBJUyJ9",
+  "publicKey": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE0eUEQJuc8jdm7VKybrdHdh84Iy9U\nqbMz1eBFak0caMYFBd6fwbsugBo/m46lLKvgb/9emHho25mKuFwTGMj37w==\n-----END PUBLIC KEY-----\n",
+  "provenance": {
+    "runtime": "Node.js v22.18.0",
+    "serialization": "JSON.stringify",
+    "algorithm": "ssl3-sha1",
+    "crossCompatibility": "eBay/event-notification-nodejs-sdk lib/validator.js"
+  }
+}

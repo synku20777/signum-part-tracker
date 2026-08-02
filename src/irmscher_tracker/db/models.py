@@ -23,8 +23,15 @@ class ListingRow(Base):
     currency: Mapped[str] = mapped_column(sa.String)
     shipping_cost: Mapped[Decimal | None] = mapped_column(sa.Numeric(precision=12, scale=2))
     condition: Mapped[str] = mapped_column(sa.String)
-    seller: Mapped[str] = mapped_column(sa.String)
+    seller_display: Mapped[str] = mapped_column(sa.String)
+    seller_identifier: Mapped[str | None] = mapped_column(sa.String)
+    seller_identifier_type: Mapped[str | None] = mapped_column(sa.String)
+    seller_feedback_score: Mapped[int | None] = mapped_column(sa.Integer)
+    seller_feedback_percentage: Mapped[Decimal | None] = mapped_column(
+        sa.Numeric(precision=7, scale=4)
+    )
     seller_location: Mapped[str] = mapped_column(sa.String)
+    seller_anonymized_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
     published_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
     first_seen_at: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True), server_default=sa.func.now()
@@ -76,7 +83,13 @@ class ListingSnapshotRow(Base):
     currency: Mapped[str] = mapped_column(sa.String)
     shipping_cost: Mapped[Decimal | None] = mapped_column(sa.Numeric(precision=12, scale=2))
     condition: Mapped[str] = mapped_column(sa.String)
-    seller: Mapped[str] = mapped_column(sa.String)
+    seller_display: Mapped[str] = mapped_column(sa.String)
+    seller_identifier: Mapped[str | None] = mapped_column(sa.String)
+    seller_identifier_type: Mapped[str | None] = mapped_column(sa.String)
+    seller_feedback_score: Mapped[int | None] = mapped_column(sa.Integer)
+    seller_feedback_percentage: Mapped[Decimal | None] = mapped_column(
+        sa.Numeric(precision=7, scale=4)
+    )
     seller_location: Mapped[str] = mapped_column(sa.String)
     image_urls_json: Mapped[str] = mapped_column(sa.Text)
     captured_at: Mapped[datetime] = mapped_column(
@@ -128,3 +141,28 @@ class SearchRunRow(Base):
     alerts_sent: Mapped[int] = mapped_column(sa.Integer)
     errors_json: Mapped[str | None] = mapped_column(sa.Text)
     status: Mapped[str] = mapped_column(sa.String)
+
+
+class EbayDeletionNotificationRow(Base):
+    __tablename__ = "ebay_deletion_notifications"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    notification_id: Mapped[str] = mapped_column(sa.String, unique=True, index=True)
+    username: Mapped[str | None] = mapped_column(sa.String)
+    user_id: Mapped[str | None] = mapped_column(sa.String)
+    eias_token: Mapped[str | None] = mapped_column(sa.String)
+    status: Mapped[str] = mapped_column(sa.String, default="pending", index=True)
+    received_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
+    processed_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(sa.Integer, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    last_error_code: Mapped[str | None] = mapped_column(sa.String)
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "status IN ('pending', 'processing', 'processed')",
+            name="ck_ebay_deletion_status",
+        ),
+    )

@@ -11,6 +11,11 @@ from irmscher_tracker.sources.ebay import (
     EbayAdapter,
     EbayAuthError,
 )
+from irmscher_tracker.sources.ebay_client import (
+    EBAY_ENDPOINTS,
+    EbayApplicationTokenProvider,
+    EbayEnvironment,
+)
 
 
 def get_sample_response():
@@ -68,8 +73,37 @@ async def test_search_returns_listings(ebay_adapter):
     assert listing.title == "Irmscher Frontspoiler Signum i3401009"
     assert listing.price == Decimal("299.99")
     assert listing.condition == ListingCondition.USED
+    assert listing.seller_display == "test_seller"
+    assert listing.seller_identifier == "test_seller"
+    assert listing.seller_identifier_type == "username_or_user_id"
 
     await ebay_adapter.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_sandbox_endpoints_and_expired_token_refresh():
+    endpoints = EBAY_ENDPOINTS[EbayEnvironment.SANDBOX]
+    token_route = respx.post(endpoints.oauth_url).mock(
+        return_value=httpx.Response(200, json={"access_token": "token", "expires_in": 0})
+    )
+    provider = EbayApplicationTokenProvider("test", "secret", EbayEnvironment.SANDBOX, 5)
+    adapter = EbayAdapter(
+        client_id="test",
+        client_secret="secret",
+        environment=EbayEnvironment.SANDBOX,
+        token_provider=provider,
+    )
+    respx.get(endpoints.browse_search_url).mock(
+        return_value=httpx.Response(200, json=get_sample_response())
+    )
+    try:
+        await adapter.search(["first"])
+        await adapter.search(["second"])
+        assert token_route.call_count == 2
+    finally:
+        await adapter.close()
+        await provider.close()
 
 
 @pytest.mark.asyncio

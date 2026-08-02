@@ -49,6 +49,11 @@ def test_health_endpoint(test_client):
         "ebay_configured": True,
         "sscom_configured": True,
         "telegram_configured": True,
+        "ebay_environment": "sandbox",
+        "ebay_deletion_callback_configured": False,
+        "ebay_deletion_worker": "disabled",
+        "ebay_deletion_pending": 0,
+        "ebay_deletion_oldest_pending_seconds": None,
     }
 
 
@@ -178,7 +183,7 @@ def _listing(external_id: str, source: str, active: bool) -> ListingRow:
         price=Decimal("100"),
         currency="EUR",
         condition="new",
-        seller="",
+        seller_display="",
         seller_location="",
         published_at=now,
         first_seen_at=now,

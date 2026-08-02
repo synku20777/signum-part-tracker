@@ -27,7 +27,11 @@ def test_empty_database_migrates_to_head(monkeypatch):
         with closing(sqlite3.connect(database)) as connection:
             revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
             columns = {row[1]: row for row in connection.execute("PRAGMA table_info(listings)")}
-        assert revision == ("9c1e4a7b2f60",)
+            deletion_table = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name='ebay_deletion_notifications'"
+            ).fetchone()
+        assert revision == ("b7d9e2f4a6c1",)
         assert {
             "image_urls_json",
             "consecutive_misses",
@@ -37,8 +41,12 @@ def test_empty_database_migrates_to_head(monkeypatch):
             "rss_fingerprint_enriched",
             "last_detail_success_at",
             "detail_status",
+            "seller_display",
+            "seller_identifier",
+            "seller_anonymized_at",
         } <= columns.keys()
         assert columns["price"][3] == 0
+        assert deletion_table == ("ebay_deletion_notifications",)
     finally:
         database.unlink(missing_ok=True)
 
@@ -95,6 +103,9 @@ def test_populated_revision_001_is_backfilled(monkeypatch):
             matches = connection.execute(
                 "SELECT id, compatibility_status FROM part_matches WHERE listing_id=1"
             ).fetchall()
+            seller = connection.execute(
+                "SELECT seller_display, seller_identifier FROM listings WHERE id=1"
+            ).fetchone()
 
         assert json.loads(listing[0]) == ["https://image"]
         assert listing[1] == 0
@@ -105,11 +116,12 @@ def test_populated_revision_001_is_backfilled(monkeypatch):
         assert json.loads(snapshot[2]) == ["https://image"]
         assert notification == ("legacy:1", 2)
         assert matches == [(2, "unknown")]
+        assert seller == ("seller", None)
     finally:
         database.unlink(missing_ok=True)
 
 
-def test_populated_current_head_upgrades_to_sscom_revision(monkeypatch):
+def test_populated_6a_revision_upgrades_to_head(monkeypatch):
     database = _database_file("populated-6a")
     try:
         _upgrade(monkeypatch, database, "6a26ec39bb13")
@@ -130,5 +142,35 @@ def test_populated_current_head_upgrades_to_sscom_revision(monkeypatch):
                 "SELECT price, source_metadata_json, detail_status FROM listings"
             ).fetchone()
         assert row == (42, '{"schema_version":1}', "not_applicable")
+    finally:
+        database.unlink(missing_ok=True)
+
+
+def test_populated_sscom_revision_upgrades_to_deletion_revision(monkeypatch):
+    database = _database_file("populated-9c")
+    try:
+        _upgrade(monkeypatch, database, "9c1e4a7b2f60")
+        now = "2026-08-02 12:00:00"
+        with closing(sqlite3.connect(database)) as connection:
+            connection.execute(
+                "INSERT INTO listings (source, external_id, title, description, url, "
+                "image_urls_json, price, currency, condition, seller, seller_location, "
+                "published_at, last_seen_at, source_metadata_json, detail_status, "
+                "consecutive_misses, is_active) VALUES "
+                "('ebay', 'item-3', 'Title', '', 'https://item', '[]', NULL, 'EUR', "
+                "'used', 'legacy_seller (10, 99%)', 'DE', ?, ?, '{\"schema_version\":1}', "
+                "'not_applicable', 0, 1)",
+                (now, now),
+            )
+            connection.commit()
+        _upgrade(monkeypatch, database, "head")
+        with closing(sqlite3.connect(database)) as connection:
+            listing = connection.execute(
+                "SELECT seller_display, seller_identifier, seller_anonymized_at, price "
+                "FROM listings"
+            ).fetchone()
+            revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
+        assert listing == ("legacy_seller (10, 99%)", None, None, None)
+        assert revision == ("b7d9e2f4a6c1",)
     finally:
         database.unlink(missing_ok=True)

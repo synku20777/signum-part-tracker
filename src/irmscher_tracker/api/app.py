@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import secrets
@@ -12,11 +13,14 @@ from typing import Annotated, Literal, cast
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from starlette.background import BackgroundTask
 
 from irmscher_tracker import __version__
 from irmscher_tracker.api.schemas import (
+    EbayDeletionPayload,
     HealthResponse,
     ListingResponse,
     MatchResponse,
@@ -26,6 +30,7 @@ from irmscher_tracker.api.schemas import (
 from irmscher_tracker.db.engine import get_session_factory
 from irmscher_tracker.db.models import ListingRow, PartMatchRow, SearchRunRow
 from irmscher_tracker.db.repositories import (
+    EbayDeletionRepository,
     ListingRepository,
     MatchRepository,
     SearchRunRepository,
@@ -34,6 +39,13 @@ from irmscher_tracker.domain import ListingCondition, NormalizedListing, Source
 from irmscher_tracker.matcher import PartMatcher
 from irmscher_tracker.notifications.telegram import TelegramNotifier
 from irmscher_tracker.services.alert import AlertService
+from irmscher_tracker.services.ebay_deletion import (
+    EbayDeletionWorker,
+    EbayNotificationVerifier,
+    EbaySignatureError,
+    EbayVerificationUnavailable,
+    notification_correlation,
+)
 from irmscher_tracker.services.search import (
     SearchService,
     SourceBusyError,
@@ -42,6 +54,11 @@ from irmscher_tracker.services.search import (
 from irmscher_tracker.settings import Settings, get_settings
 from irmscher_tracker.sources.base import SourceAdapter
 from irmscher_tracker.sources.ebay import EbayAdapter
+from irmscher_tracker.sources.ebay_client import (
+    EBAY_ENDPOINTS,
+    EbayApplicationTokenProvider,
+    EbayEnvironment,
+)
 from irmscher_tracker.sources.sscom import SscomAdapter, load_feed_urls
 
 logger = logging.getLogger(__name__)
@@ -55,6 +72,10 @@ class RuntimeState:
     coordinator: SourceRunCoordinator
     scheduler_tasks: dict[Source, asyncio.Task[None]] = field(default_factory=dict)
     manual_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
+    ebay_token_provider: EbayApplicationTokenProvider | None = None
+    ebay_notification_verifier: EbayNotificationVerifier | None = None
+    ebay_deletion_worker: EbayDeletionWorker | None = None
+    ebay_deletion_task: asyncio.Task[None] | None = None
 
 
 def _search_service(runtime: RuntimeState, notifier: TelegramNotifier | None) -> SearchService:
@@ -122,7 +143,11 @@ async def _known_sscom_listings(runtime: RuntimeState) -> dict[str, NormalizedLi
             currency=row.currency,
             shipping_cost=row.shipping_cost,
             condition=condition,
-            seller=row.seller,
+            seller_display=row.seller_display,
+            seller_identifier=row.seller_identifier or "",
+            seller_identifier_type=row.seller_identifier_type or "",
+            seller_feedback_score=row.seller_feedback_score,
+            seller_feedback_percentage=row.seller_feedback_percentage,
             seller_location=row.seller_location,
             published_at=row.published_at,
             source_metadata=metadata,
@@ -137,12 +162,16 @@ async def _known_sscom_listings(runtime: RuntimeState) -> dict[str, NormalizedLi
 
 async def _create_ebay_adapter(runtime: RuntimeState) -> SourceAdapter:
     settings = runtime.settings
+    if runtime.ebay_token_provider is None:
+        raise ValueError("eBay is not configured")
     return EbayAdapter(
         client_id=settings.ebay_client_id,
         client_secret=settings.ebay_client_secret.get_secret_value(),
         marketplace_id=settings.ebay_marketplace_id,
         timeout=settings.ebay_api_timeout,
         max_results_per_query=settings.ebay_max_results_per_query,
+        environment=settings.ebay_environment,
+        token_provider=runtime.ebay_token_provider,
     )
 
 
@@ -227,6 +256,21 @@ def create_app(
             session_factory=session_factory,
             coordinator=SourceRunCoordinator(),
         )
+        if settings.ebay_client_id and settings.ebay_client_secret.get_secret_value():
+            runtime.ebay_token_provider = EbayApplicationTokenProvider(
+                settings.ebay_client_id,
+                settings.ebay_client_secret.get_secret_value(),
+                settings.ebay_environment,
+                settings.ebay_api_timeout,
+            )
+        if settings.ebay_deletion_callback_ready and runtime.ebay_token_provider:
+            runtime.ebay_notification_verifier = EbayNotificationVerifier(
+                runtime.ebay_token_provider,
+                EBAY_ENDPOINTS[settings.ebay_environment],
+                settings.ebay_api_timeout,
+            )
+            runtime.ebay_deletion_worker = EbayDeletionWorker(session_factory)
+            runtime.ebay_deletion_task = asyncio.create_task(runtime.ebay_deletion_worker.run())
         app.state.runtime = runtime
         async with session_factory() as session:
             await SearchRunRepository().interrupt_stale(session)
@@ -245,11 +289,17 @@ def create_app(
             yield
         finally:
             tasks = [*runtime.scheduler_tasks.values(), *runtime.manual_tasks.values()]
+            if runtime.ebay_deletion_task is not None:
+                tasks.append(runtime.ebay_deletion_task)
             for task in tasks:
                 task.cancel()
             for task in tasks:
                 with suppress(asyncio.CancelledError):
                     await task
+            if runtime.ebay_notification_verifier is not None:
+                await runtime.ebay_notification_verifier.close()
+            if runtime.ebay_token_provider is not None:
+                await runtime.ebay_token_provider.close()
 
     app = FastAPI(
         title="Irmscher Parts Tracker",
@@ -296,8 +346,40 @@ def create_app(
             if all(not task.done() for task in current.scheduler_tasks.values())
             else "stopped"
         )
+        deletion_repository = EbayDeletionRepository()
+        deletion_pending = 0
+        deletion_oldest: float | None = None
+        if database == "ok":
+            async with current.session_factory() as session:
+                deletion_pending, deletion_oldest = await deletion_repository.pending_stats(
+                    session
+                )
+        deletion_worker: Literal["disabled", "running", "stopped"] = (
+            "disabled"
+            if not current.settings.ebay_deletion_callback_ready
+            else (
+                "running"
+                if current.ebay_deletion_task is not None and not current.ebay_deletion_task.done()
+                else "stopped"
+            )
+        )
+        deletion_overdue = (
+            deletion_oldest is not None
+            and deletion_oldest > current.settings.ebay_deletion_max_pending_hours * 3600
+        )
+        deletion_required_missing = bool(
+            current.settings.ebay_enabled
+            and current.settings.ebay_environment is EbayEnvironment.PRODUCTION
+            and not current.settings.ebay_deletion_callback_ready
+        )
         status: Literal["ok", "degraded"] = (
-            "ok" if database == "ok" and scheduler == "running" else "degraded"
+            "ok"
+            if database == "ok"
+            and scheduler == "running"
+            and not deletion_required_missing
+            and deletion_worker != "stopped"
+            and not deletion_overdue
+            else "degraded"
         )
         if status == "degraded":
             response.status_code = 503
@@ -314,7 +396,89 @@ def create_app(
                 and settings.telegram_bot_token.get_secret_value()
                 and settings.telegram_chat_id
             ),
+            ebay_environment=settings.ebay_environment.value,
+            ebay_deletion_callback_configured=settings.ebay_deletion_callback_configured,
+            ebay_deletion_worker=deletion_worker,
+            ebay_deletion_pending=deletion_pending,
+            ebay_deletion_oldest_pending_seconds=deletion_oldest,
         )
+
+    @app.get("/ebay/marketplace-account-deletion")
+    async def ebay_deletion_challenge(
+        request: Request,
+        challenge_code: str = Query(min_length=1, max_length=256),
+    ) -> dict[str, str]:
+        settings = runtime(request).settings
+        if not settings.ebay_deletion_callback_configured:
+            raise HTTPException(status_code=503, detail="eBay deletion callback is not configured")
+        value = (
+            challenge_code
+            + settings.ebay_deletion_verification_token.get_secret_value()
+            + settings.ebay_deletion_endpoint_url
+        )
+        return {"challengeResponse": hashlib.sha256(value.encode()).hexdigest()}
+
+    @app.post("/ebay/marketplace-account-deletion", status_code=204)
+    async def ebay_deletion_notification(request: Request) -> Response:
+        current = runtime(request)
+        if not current.settings.ebay_deletion_callback_ready:
+            raise HTTPException(status_code=503, detail="eBay deletion callback is not configured")
+        if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != (
+            "application/json"
+        ):
+            raise HTTPException(status_code=400, detail="Malformed eBay deletion notification")
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 64 * 1024:
+                raise HTTPException(status_code=400, detail="Malformed eBay deletion notification")
+        try:
+            parsed = json.loads(body)
+            payload = EbayDeletionPayload.model_validate(parsed)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValidationError, TypeError):
+            raise HTTPException(
+                status_code=400, detail="Malformed eBay deletion notification"
+            ) from None
+
+        verifier = current.ebay_notification_verifier
+        if verifier is None:
+            raise HTTPException(status_code=503, detail="eBay verification is unavailable")
+        try:
+            await verifier.verify(parsed, request.headers.get("x-ebay-signature"))
+        except EbaySignatureError:
+            raise HTTPException(
+                status_code=412, detail="Invalid eBay notification signature"
+            ) from None
+        except EbayVerificationUnavailable:
+            raise HTTPException(
+                status_code=503, detail="eBay verification is unavailable"
+            ) from None
+
+        notification = payload.notification
+        correlation = notification_correlation(notification.notificationId)
+        try:
+            async with current.session_factory() as session:
+                inserted = await EbayDeletionRepository().reserve(
+                    session,
+                    notification_id=notification.notificationId,
+                    username=notification.data.username,
+                    user_id=notification.data.userId,
+                    eias_token=notification.data.eiasToken,
+                )
+                await session.commit()
+        except Exception:
+            logger.error("Deletion notification reservation failed")
+            raise HTTPException(
+                status_code=500, detail="Deletion notification was not accepted"
+            ) from None
+        if inserted:
+            logger.info("Deletion notification reserved correlation=%s", correlation)
+        background = (
+            BackgroundTask(current.ebay_deletion_worker.wake)
+            if current.ebay_deletion_worker is not None
+            else None
+        )
+        return Response(status_code=204, background=background)
 
     @app.get("/listings", response_model=list[ListingResponse])
     async def list_listings(
@@ -439,7 +603,7 @@ def _listing_to_response(row: ListingRow) -> ListingResponse:
         currency=row.currency,
         shipping_cost=row.shipping_cost,
         condition=row.condition or "unknown",
-        seller=row.seller or "",
+        seller=row.seller_display or "",
         seller_location=row.seller_location or "",
         published_at=row.published_at,
         first_seen_at=row.first_seen_at,
