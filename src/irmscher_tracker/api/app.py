@@ -317,7 +317,11 @@ def create_app(
     ) -> None:
         expected = runtime(request).settings.api_token.get_secret_value()
         if not secrets.compare_digest(credentials.credentials, expected):
-            raise HTTPException(status_code=401, detail="Invalid API token")
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid API token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
     @app.exception_handler(SourceBusyError)
     async def source_busy_handler(request: Request, exc: SourceBusyError) -> JSONResponse:

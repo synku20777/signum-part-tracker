@@ -58,11 +58,15 @@ def test_health_endpoint(test_client):
 
 
 def test_protected_endpoint_requires_valid_token(test_client, settings):
-    assert test_client.post("/runs/ebay").status_code == 401
-    assert (
-        test_client.post("/runs/ebay", headers={"Authorization": "Bearer wrong-token"}).status_code
-        == 401
-    )
+    for headers in (
+        {},
+        {"Authorization": "Basic malformed"},
+        {"Authorization": "Bearer wrong-token"},
+    ):
+        response = test_client.post("/runs/ebay", headers=headers)
+        assert response.status_code == 401
+        assert response.headers["WWW-Authenticate"] == "Bearer"
+
     settings.ebay_enabled = False
     response = test_client.post(
         "/runs/ebay",

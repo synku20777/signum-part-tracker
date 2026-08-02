@@ -16,6 +16,7 @@ from irmscher_tracker.sources.ebay_client import EbayEnvironment
 @pytest.fixture
 def settings():
     return Settings(
+        _env_file=None,
         api_token="test-api-token-test-api-token-123456",
         database_url="sqlite+aiosqlite:///:memory:",
         ebay_enabled=True,
@@ -34,8 +35,9 @@ def settings():
 
 
 @pytest_asyncio.fixture
-async def db_engine():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+async def db_engine(tmp_path: Path):
+    database_url = f"sqlite+aiosqlite:///{(tmp_path / 'test.db').as_posix()}"
+    engine = create_async_engine(database_url, echo=False)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield engine

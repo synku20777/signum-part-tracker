@@ -119,6 +119,8 @@ restarts only after success.
 - `GET /search-runs/{id}` returns one run for polling.
 - `POST /runs/{source}` requires `Authorization: Bearer <token>` and returns
   HTTP 202 with a running search-run ID.
+- Missing, malformed, and incorrect bearer credentials return HTTP 401 with
+  `WWW-Authenticate: Bearer`. The tracker has no role-based HTTP 403 case.
 - `GET` and `POST /ebay/marketplace-account-deletion` are public eBay callback
   methods and intentionally do not use the tracker bearer token.
 
