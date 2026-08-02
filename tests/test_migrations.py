@@ -31,7 +31,7 @@ def test_empty_database_migrates_to_head(monkeypatch):
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name='ebay_deletion_notifications'"
             ).fetchone()
-        assert revision == ("b7d9e2f4a6c1",)
+        assert revision == ("d4f8a2c6e9b1",)
         assert {
             "image_urls_json",
             "consecutive_misses",
@@ -47,6 +47,12 @@ def test_empty_database_migrates_to_head(monkeypatch):
         } <= columns.keys()
         assert columns["price"][3] == 0
         assert deletion_table == ("ebay_deletion_notifications",)
+        with closing(sqlite3.connect(database)) as connection:
+            review_tables = {
+                row[0]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            }
+        assert {"listing_images", "manual_reviews", "reference_images"} <= review_tables
     finally:
         database.unlink(missing_ok=True)
 
@@ -117,6 +123,11 @@ def test_populated_revision_001_is_backfilled(monkeypatch):
         assert notification == ("legacy:1", 2)
         assert matches == [(2, "unknown")]
         assert seller == ("seller", None)
+        with closing(sqlite3.connect(database)) as connection:
+            images = connection.execute(
+                "SELECT source_url, position, is_current FROM listing_images WHERE listing_id=1"
+            ).fetchall()
+        assert images == [("https://image", 0, 1)]
     finally:
         database.unlink(missing_ok=True)
 
@@ -171,6 +182,41 @@ def test_populated_sscom_revision_upgrades_to_deletion_revision(monkeypatch):
             ).fetchone()
             revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
         assert listing == ("legacy_seller (10, 99%)", None, None, None)
-        assert revision == ("b7d9e2f4a6c1",)
+        assert revision == ("d4f8a2c6e9b1",)
+    finally:
+        database.unlink(missing_ok=True)
+
+
+def test_review_migration_backfill_skips_malformed_images(monkeypatch):
+    database = _database_file("review-backfill")
+    try:
+        _upgrade(monkeypatch, database, "b7d9e2f4a6c1")
+        now = "2026-08-02 12:00:00"
+        values = [
+            (
+                "valid",
+                '[" https://i.ebayimg.com/one.jpg ", "https://i.ebayimg.com/one.jpg", 4, "ftp://bad"]',
+            ),
+            ("bad-json", "{"),
+        ]
+        with closing(sqlite3.connect(database)) as connection:
+            for external_id, images in values:
+                connection.execute(
+                    "INSERT INTO listings (source, external_id, title, description, url, "
+                    "image_urls_json, price, currency, condition, seller_display, "
+                    "seller_location, "
+                    "published_at, last_seen_at, source_metadata_json, detail_status, "
+                    "consecutive_misses, is_active) VALUES "
+                    "('ebay', ?, 'Title', '', 'https://item', ?, 1, 'EUR', 'used', '', '', "
+                    "?, ?, '{\"schema_version\":1}', 'not_applicable', 0, 1)",
+                    (external_id, images, now, now),
+                )
+            connection.commit()
+        _upgrade(monkeypatch, database, "head")
+        with closing(sqlite3.connect(database)) as connection:
+            images = connection.execute(
+                "SELECT source_url, position FROM listing_images ORDER BY id"
+            ).fetchall()
+        assert images == [("https://i.ebayimg.com/one.jpg", 0)]
     finally:
         database.unlink(missing_ok=True)

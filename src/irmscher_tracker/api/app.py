@@ -8,10 +8,11 @@ import secrets
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Annotated, Literal, cast
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import ValidationError
 from sqlalchemy import text
@@ -23,7 +24,15 @@ from irmscher_tracker.api.schemas import (
     EbayDeletionPayload,
     HealthResponse,
     ListingResponse,
+    ManualReviewCreatedResponse,
+    ManualReviewRequest,
     MatchResponse,
+    ReferenceImageResponse,
+    ReferenceUpdateRequest,
+    ReviewListingDetailResponse,
+    ReviewPartResponse,
+    ReviewProgressResponse,
+    ReviewQueueResponse,
     RunAcceptedResponse,
     SearchRunResponse,
 )
@@ -45,6 +54,12 @@ from irmscher_tracker.services.ebay_deletion import (
     EbaySignatureError,
     EbayVerificationUnavailable,
     notification_correlation,
+)
+from irmscher_tracker.services.review import (
+    ReferenceImageStore,
+    ReviewConflictError,
+    ReviewNotFoundError,
+    ReviewService,
 )
 from irmscher_tracker.services.search import (
     SearchService,
@@ -76,13 +91,16 @@ class RuntimeState:
     ebay_notification_verifier: EbayNotificationVerifier | None = None
     ebay_deletion_worker: EbayDeletionWorker | None = None
     ebay_deletion_task: asyncio.Task[None] | None = None
+    matcher: PartMatcher | None = None
+    reference_store: ReferenceImageStore | None = None
+    review_service: ReviewService | None = None
 
 
 def _search_service(runtime: RuntimeState, notifier: TelegramNotifier | None) -> SearchService:
     settings = runtime.settings
     return SearchService(
         session_factory=runtime.session_factory,
-        matcher=PartMatcher(settings.parts_config_path),
+        matcher=runtime.matcher or PartMatcher(settings.parts_config_path),
         alert_service=AlertService(notifier),
         coordinator=runtime.coordinator,
         score_threshold=settings.minimum_match_score,
@@ -256,6 +274,11 @@ def create_app(
             session_factory=session_factory,
             coordinator=SourceRunCoordinator(),
         )
+        runtime.matcher = PartMatcher(settings.parts_config_path)
+        runtime.reference_store = ReferenceImageStore(settings.data_directory)
+        runtime.review_service = ReviewService(
+            session_factory, runtime.matcher, runtime.reference_store
+        )
         if settings.ebay_client_id and settings.ebay_client_secret.get_secret_value():
             runtime.ebay_token_provider = EbayApplicationTokenProvider(
                 settings.ebay_client_id,
@@ -300,6 +323,8 @@ def create_app(
                 await runtime.ebay_notification_verifier.close()
             if runtime.ebay_token_provider is not None:
                 await runtime.ebay_token_provider.close()
+            if runtime.reference_store is not None:
+                await runtime.reference_store.close()
 
     app = FastAPI(
         title="Irmscher Parts Tracker",
@@ -307,6 +332,22 @@ def create_app(
         version=__version__,
         lifespan=lifespan,
     )
+
+    @app.middleware("http")
+    async def security_headers(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: "
+            "https://i.ebayimg.com https://i.ss.com; connect-src 'self'; base-uri 'none'; "
+            "form-action 'none'; frame-ancestors 'none'"
+        )
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Cache-Control"] = "no-store"
+        return response
 
     def runtime(request: Request) -> RuntimeState:
         return cast(RuntimeState, request.app.state.runtime)
@@ -322,6 +363,12 @@ def create_app(
                 detail="Invalid API token",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
+    def reviews(request: Request) -> ReviewService:
+        service = runtime(request).review_service
+        if service is None:
+            raise HTTPException(status_code=503, detail="Review service is unavailable")
+        return service
 
     @app.exception_handler(SourceBusyError)
     async def source_busy_handler(request: Request, exc: SourceBusyError) -> JSONResponse:
@@ -586,6 +633,147 @@ def create_app(
 
         task.add_done_callback(remove_finished)
         return RunAcceptedResponse(search_run_id=run_id, status="running")
+
+    static_directory = Path(__file__).with_name("static")
+
+    @app.get("/review", response_class=HTMLResponse, include_in_schema=False)
+    async def review_page() -> HTMLResponse:
+        return HTMLResponse((static_directory / "review.html").read_text(encoding="utf-8"))
+
+    @app.get("/review/assets/review.css", include_in_schema=False)
+    async def review_css() -> PlainTextResponse:
+        return PlainTextResponse(
+            (static_directory / "review.css").read_text(encoding="utf-8"),
+            media_type="text/css",
+        )
+
+    @app.get("/review/assets/review.js", include_in_schema=False)
+    async def review_js() -> PlainTextResponse:
+        return PlainTextResponse(
+            (static_directory / "review.js").read_text(encoding="utf-8"),
+            media_type="text/javascript",
+        )
+
+    @app.get(
+        "/review/parts",
+        response_model=list[ReviewPartResponse],
+        dependencies=[Depends(verify_token)],
+    )
+    async def review_parts(request: Request) -> list[ReviewPartResponse]:
+        matcher = runtime(request).matcher
+        if matcher is None:
+            raise HTTPException(status_code=503, detail="Review service is unavailable")
+        return [ReviewPartResponse(id=part.id, name=part.name) for part in matcher.parts]
+
+    @app.get(
+        "/review/progress",
+        response_model=ReviewProgressResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def review_progress(request: Request) -> ReviewProgressResponse:
+        return await reviews(request).progress()
+
+    @app.get(
+        "/review/queue",
+        response_model=ReviewQueueResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def review_queue(
+        request: Request,
+        status: Literal[
+            "all", "unreviewed", "reviewed", "confirmed", "rejected", "uncertain"
+        ] = "unreviewed",
+        source: str | None = None,
+        part_id: str | None = None,
+        is_active: Literal["true", "false", "all"] = "true",
+        min_score: int | None = None,
+        max_score: int | None = None,
+        has_images: Literal["true", "false", "all"] = "true",
+        match_state: Literal["all", "matched", "unmatched"] = "all",
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+    ) -> ReviewQueueResponse:
+        return await reviews(request).queue(
+            status=status,
+            source=source,
+            part_id=part_id,
+            is_active=None if is_active == "all" else is_active == "true",
+            min_score=min_score,
+            max_score=max_score,
+            has_images=None if has_images == "all" else has_images == "true",
+            match_state=match_state,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get(
+        "/review/listings/{listing_id}",
+        response_model=ReviewListingDetailResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def review_listing(request: Request, listing_id: int) -> ReviewListingDetailResponse:
+        try:
+            return await reviews(request).detail(listing_id)
+        except ReviewNotFoundError:
+            raise HTTPException(status_code=404, detail="Listing not found") from None
+
+    @app.post(
+        "/review/listings/{listing_id}",
+        response_model=ManualReviewCreatedResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def submit_review(
+        request: Request, listing_id: int, payload: ManualReviewRequest
+    ) -> ManualReviewCreatedResponse:
+        try:
+            return await reviews(request).submit(listing_id, payload)
+        except ReviewNotFoundError:
+            raise HTTPException(status_code=404, detail="Listing not found") from None
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+    @app.get(
+        "/review/references",
+        response_model=list[ReferenceImageResponse],
+        dependencies=[Depends(verify_token)],
+    )
+    async def review_references(
+        request: Request,
+        part_id: str | None = None,
+        label: Literal["positive", "negative"] | None = None,
+        is_active: bool | None = None,
+    ) -> list[ReferenceImageResponse]:
+        return await reviews(request).references(part_id=part_id, label=label, is_active=is_active)
+
+    @app.get(
+        "/review/references/{reference_id}/content",
+        dependencies=[Depends(verify_token)],
+        response_class=FileResponse,
+    )
+    async def reference_content(request: Request, reference_id: int) -> FileResponse:
+        try:
+            path = await reviews(request).content_path(reference_id)
+        except ReviewNotFoundError:
+            raise HTTPException(status_code=404, detail="Reference image not found") from None
+        return FileResponse(path, media_type="image/webp")
+
+    @app.patch(
+        "/review/references/{reference_id}",
+        response_model=ReferenceImageResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def update_reference(
+        request: Request, reference_id: int, payload: ReferenceUpdateRequest
+    ) -> ReferenceImageResponse:
+        try:
+            return await reviews(request).update_reference(reference_id, payload)
+        except ReviewNotFoundError:
+            raise HTTPException(status_code=404, detail="Reference image not found") from None
+        except ReviewConflictError:
+            raise HTTPException(
+                status_code=409,
+                detail="The same image already has another active label for this part",
+            ) from None
 
     return app
 

@@ -76,7 +76,7 @@ switch ($Command) {
     }
     "doctor" { docker compose exec $Service tracker doctor }
     "backup" {
-        $filename = if ($Value) { $Value } else { "backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').sqlite" }
+        $filename = if ($Value) { $Value } else { "backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').tar.gz" }
         Assert-BackupName $filename
         docker compose exec $Service tracker backup "/app/data/$filename"
         Write-Host "Backup created at data/$filename"
@@ -84,7 +84,7 @@ switch ($Command) {
     "restore" {
         Assert-BackupName $Value
         if (-not (Test-Path -LiteralPath (Join-Path "data" $Value))) { throw "data/$Value not found" }
-        $before = "pre_restore_$(Get-Date -Format 'yyyyMMdd_HHmmss').sqlite"
+        $before = "pre_restore_$(Get-Date -Format 'yyyyMMdd_HHmmss').tar.gz"
         docker compose exec $Service tracker backup "/app/data/$before"
         docker compose stop $Service
         try {
@@ -92,8 +92,10 @@ switch ($Command) {
             docker compose start $Service
             Wait-TrackerHealth
         } catch {
+            docker compose run --rm --no-deps -T --entrypoint tracker $Service restore "/app/data/$before"
             docker compose start $Service
-            throw "Restore failed; pre-restore backup is data/$before"
+            Wait-TrackerHealth
+            throw "Restore failed; recovered from data/$before"
         }
     }
     "update" {

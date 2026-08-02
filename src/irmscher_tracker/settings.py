@@ -124,6 +124,13 @@ class Settings(BaseSettings):
     def sources_config_path(self) -> Path:
         return self.config_directory / "sources.yaml"
 
+    @property
+    def data_directory(self) -> Path:
+        prefix = "sqlite+aiosqlite:///"
+        if not self.database_url.startswith(prefix) or self.database_url.endswith(":memory:"):
+            return Path("data").resolve()
+        return Path(self.database_url.removeprefix(prefix)).resolve().parent
+
 
 def get_settings() -> Settings:
     # Pydantic supplies this required field from TRACKER_API_TOKEN at runtime.

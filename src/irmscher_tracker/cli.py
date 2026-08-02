@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sqlite3
 import subprocess
 import sys
 import time
@@ -14,6 +13,12 @@ import uvicorn
 from rich.console import Console
 from rich.logging import RichHandler
 
+from irmscher_tracker.services.backup import (
+    BackupError,
+    audit_reference_storage,
+    create_backup,
+    restore_backup,
+)
 from irmscher_tracker.settings import Settings, get_settings
 from irmscher_tracker.sources.ebay_client import EbayEnvironment
 from irmscher_tracker.sources.sscom import load_feed_urls
@@ -129,6 +134,10 @@ def doctor() -> None:
             settings.telegram_bot_token.get_secret_value() and settings.telegram_chat_id
         ),
     }
+    missing_references, removed_temporary_files = audit_reference_storage(
+        database_path, settings.data_directory
+    )
+    checks["reference files"] = missing_references == 0
     health_payload: dict[str, object] = {}
     try:
         response = httpx.get(f"http://127.0.0.1:{settings.api_port}/health", timeout=5.0)
@@ -142,6 +151,10 @@ def doctor() -> None:
     }
     for name, healthy in checks.items():
         console.print(f"{'OK' if healthy else 'MISSING'}: {name}")
+    console.print(
+        f"Reference storage: missing={missing_references}, "
+        f"stale_temporary_files_removed={removed_temporary_files}"
+    )
     for name, (enabled, configured) in source_states.items():
         console.print(
             f"{name}: enabled={'yes' if enabled else 'no'}, "
@@ -162,7 +175,8 @@ def doctor() -> None:
         f"oldest_pending_seconds={deletion_oldest}"
     )
     core_ready = all(
-        checks[name] for name in ("database", "parts config", "sources config", "API")
+        checks[name]
+        for name in ("database", "parts config", "sources config", "API", "reference files")
     )
     sources_ready = all(
         not enabled or configured for enabled, configured in source_states.values()
@@ -178,29 +192,35 @@ def doctor() -> None:
 
 @app.command("backup")
 def backup(destination: str) -> None:
-    """Create a consistent SQLite backup inside the data directory."""
-    database_path = _database_path(get_settings())
+    """Create a full archive, or a legacy database-only .sqlite backup."""
+    settings = get_settings()
+    database_path = _database_path(settings)
     destination_path = _data_file(destination, database_path)
     if not database_path.exists():
         raise typer.BadParameter(f"Database not found at {database_path}")
     if destination_path.exists():
         raise typer.BadParameter(f"Destination already exists: {destination_path}")
-    with sqlite3.connect(database_path) as source, sqlite3.connect(destination_path) as target:
-        source.backup(target)
+    try:
+        create_backup(database_path, settings.data_directory, destination_path)
+    except BackupError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     console.print(f"Backup created: {destination_path}")
 
 
 @app.command("restore")
 def restore(source: str) -> None:
-    """Restore a SQLite backup while the server is stopped."""
-    database_path = _database_path(get_settings())
+    """Restore a full archive or legacy SQLite backup while stopped."""
+    settings = get_settings()
+    database_path = _database_path(settings)
     source_path = _data_file(source, database_path)
     if not source_path.is_file():
         raise typer.BadParameter(f"Backup not found: {source_path}")
     if source_path == database_path:
         raise typer.BadParameter("Backup and database paths must differ")
-    with sqlite3.connect(source_path) as backup_db, sqlite3.connect(database_path) as target:
-        backup_db.backup(target)
+    try:
+        restore_backup(source_path, database_path, settings.data_directory)
+    except BackupError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     console.print(f"Database restored from: {source_path}")
 
 

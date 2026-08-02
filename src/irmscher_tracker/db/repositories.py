@@ -11,6 +11,7 @@ import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from urllib.parse import urlsplit
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert
@@ -18,11 +19,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from irmscher_tracker.db.models import (
     EbayDeletionNotificationRow,
+    ListingImageRow,
     ListingQueryRow,
     ListingRow,
     ListingSnapshotRow,
+    ManualReviewRow,
     NotificationRow,
     PartMatchRow,
+    ReferenceImageRow,
     SearchRunRow,
 )
 from irmscher_tracker.domain import (
@@ -35,6 +39,20 @@ from irmscher_tracker.domain import (
 
 def _canonical_decimal(value: Decimal | None) -> str | None:
     return str(value.quantize(Decimal("0.01"))) if value is not None else None
+
+
+def normalized_image_urls(values: list[str]) -> list[str]:
+    """Return valid, trimmed HTTP(S) URLs in first-seen order."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        url = value.strip()
+        parsed = urlsplit(url)
+        if not url or url in seen or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            continue
+        seen.add(url)
+        result.append(url)
+    return result
 
 
 def snapshot_payload_hash(
@@ -122,6 +140,7 @@ class ListingRepository:
             existing.title = listing.title
             existing.description = listing.description
             existing.url = listing.url
+            listing.image_urls = normalized_image_urls(listing.image_urls)
             existing.image_urls_json = json.dumps(listing.image_urls)
             existing.price = listing.price
             existing.currency = listing.currency
@@ -148,8 +167,10 @@ class ListingRepository:
             existing.detail_status = listing.detail_status
 
             await session.flush()
+            await self.sync_images(session, existing.id, listing.image_urls, now)
             return existing, False, previous_price, was_active
 
+        listing.image_urls = normalized_image_urls(listing.image_urls)
         row = ListingRow(
             source=source_str,
             external_id=listing.external_id,
@@ -180,7 +201,46 @@ class ListingRepository:
         )
         session.add(row)
         await session.flush()
+        await self.sync_images(session, row.id, listing.image_urls, now)
         return row, True, None, True
+
+    async def sync_images(
+        self,
+        session: AsyncSession,
+        listing_id: int,
+        image_urls: list[str],
+        observed_at: datetime | None = None,
+    ) -> None:
+        now = observed_at or datetime.now(UTC)
+        urls = normalized_image_urls(image_urls)
+        rows = list(
+            (
+                await session.execute(
+                    select(ListingImageRow).where(ListingImageRow.listing_id == listing_id)
+                )
+            ).scalars()
+        )
+        by_url = {row.source_url: row for row in rows}
+        for row in rows:
+            row.is_current = False
+        for position, url in enumerate(urls):
+            image_row = by_url.get(url)
+            if image_row is None:
+                session.add(
+                    ListingImageRow(
+                        listing_id=listing_id,
+                        source_url=url,
+                        position=position,
+                        is_current=True,
+                        first_seen_at=now,
+                        last_seen_at=now,
+                    )
+                )
+            else:
+                image_row.position = position
+                image_row.is_current = True
+                image_row.last_seen_at = now
+        await session.flush()
 
     async def get_by_id(self, session: AsyncSession, listing_id: int) -> ListingRow | None:
         return await session.get(ListingRow, listing_id)
@@ -697,6 +757,19 @@ class EbayDeletionRepository:
                 notification.payload_json = _scrub_json_text(
                     notification.payload_json, identifiers
                 )
+            await session.execute(
+                update(ManualReviewRow)
+                .where(ManualReviewRow.listing_id == listing.id)
+                .values(notes=None)
+            )
+            affected_images = select(ListingImageRow.id).where(
+                ListingImageRow.listing_id == listing.id
+            )
+            await session.execute(
+                update(ReferenceImageRow)
+                .where(ReferenceImageRow.listing_image_id.in_(affected_images))
+                .values(notes=None)
+            )
 
     async def mark_processed(
         self, session: AsyncSession, row: EbayDeletionNotificationRow

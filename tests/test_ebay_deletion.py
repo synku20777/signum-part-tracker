@@ -15,7 +15,10 @@ from sqlalchemy import func, select
 from irmscher_tracker.api.app import create_app
 from irmscher_tracker.db.models import (
     EbayDeletionNotificationRow,
+    ListingImageRow,
+    ManualReviewRow,
     NotificationRow,
+    ReferenceImageRow,
 )
 from irmscher_tracker.db.repositories import EbayDeletionRepository
 from irmscher_tracker.services.ebay_deletion import (
@@ -356,6 +359,7 @@ async def test_anonymization_scrubs_history_and_prevents_rehydration(db_session,
     sample_listing.seller_feedback_score = 42
     sample_listing.seller_feedback_percentage = Decimal("99.5")
     sample_listing.seller_location = "Seller city"
+    sample_listing.image_urls = ["https://i.ebayimg.com/reference.jpg"]
     repository = EbayDeletionRepository()
     from irmscher_tracker.db.repositories import ListingRepository, SnapshotRepository
 
@@ -370,6 +374,34 @@ async def test_anonymization_scrubs_history_and_prevents_rehydration(db_session,
         success=True,
     )
     db_session.add(alert)
+    listing_image = await db_session.scalar(
+        select(ListingImageRow).where(ListingImageRow.listing_id == listing.id)
+    )
+    assert listing_image is not None
+    review = ManualReviewRow(
+        listing_id=listing.id,
+        outcome="confirmed",
+        selected_part_id="front-lip",
+        notes="seller mentioned here",
+        reviewed_at=datetime.now(UTC),
+    )
+    db_session.add(review)
+    await db_session.flush()
+    reference = ReferenceImageRow(
+        listing_image_id=listing_image.id,
+        manual_review_id=review.id,
+        part_id="front-lip",
+        label="positive",
+        local_path="references/front-lip/" + "a" * 64 + ".webp",
+        content_sha256="a" * 64,
+        mime_type="image/webp",
+        width=10,
+        height=10,
+        notes="seller identity note",
+        is_active=True,
+        created_at=datetime.now(UTC),
+    )
+    db_session.add(reference)
     unrelated = sample_listing.model_copy(
         update={
             "external_id": "unrelated-eias-value",
@@ -396,6 +428,8 @@ async def test_anonymization_scrubs_history_and_prevents_rehydration(db_session,
     await db_session.refresh(listing)
     await db_session.refresh(snapshot)
     await db_session.refresh(alert)
+    await db_session.refresh(review)
+    await db_session.refresh(reference)
 
     assert listing.seller_display == ""
     assert listing.seller_identifier is None
@@ -406,6 +440,9 @@ async def test_anonymization_scrubs_history_and_prevents_rehydration(db_session,
     assert snapshot.schema_version == 2
     assert len(snapshot.payload_hash) == 64
     assert json.loads(alert.payload_json) == {"seller_location": "", "username": ""}
+    assert review.notes is None
+    assert reference.notes is None
+    assert reference.is_active is True
     assert deletion.status == "processed"
     assert deletion.username is None
     await db_session.refresh(unrelated_row)

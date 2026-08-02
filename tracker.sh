@@ -87,7 +87,7 @@ case "$command" in
         docker compose exec "$SERVICE" tracker doctor
         ;;
     backup)
-        filename="${2:-backup_$(date +%Y%m%d_%H%M%S).sqlite}"
+        filename="${2:-backup_$(date +%Y%m%d_%H%M%S).tar.gz}"
         require_backup_name "$filename"
         docker compose exec "$SERVICE" tracker backup "/app/data/$filename"
         echo "Backup created at data/$filename"
@@ -96,15 +96,17 @@ case "$command" in
         filename="${2:-}"
         require_backup_name "$filename"
         [[ -f "data/$filename" ]] || { echo "data/$filename not found" >&2; exit 2; }
-        before="pre_restore_$(date +%Y%m%d_%H%M%S).sqlite"
+        before="pre_restore_$(date +%Y%m%d_%H%M%S).tar.gz"
         docker compose exec "$SERVICE" tracker backup "/app/data/$before"
         docker compose stop "$SERVICE"
         if docker compose run --rm --no-deps -T --entrypoint tracker "$SERVICE" restore "/app/data/$filename"; then
             docker compose start "$SERVICE"
             wait_for_health
         else
+            docker compose run --rm --no-deps -T --entrypoint tracker "$SERVICE" restore "/app/data/$before"
             docker compose start "$SERVICE"
-            echo "Restore failed; pre-restore backup is data/$before" >&2
+            wait_for_health
+            echo "Restore failed; recovered from data/$before" >&2
             exit 1
         fi
         ;;

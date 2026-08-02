@@ -82,6 +82,22 @@ async def test_search_returns_listings(ebay_adapter):
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_search_rejects_unrelated_numeric_match(ebay_adapter):
+    respx.post(EBAY_AUTH_URL).mock(
+        return_value=httpx.Response(200, json={"access_token": "test_token"})
+    )
+    response = get_sample_response()
+    response["itemSummaries"][0]["title"] = "M.2 Gen3 SSD for Acer Nitro [1TB]"
+    respx.get(EBAY_SEARCH_URL).mock(return_value=httpx.Response(200, json=response))
+
+    result = await ebay_adapter.search(["Irmscher 3401009"])
+
+    assert result.hits == []
+    await ebay_adapter.close()
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_sandbox_endpoints_and_expired_token_refresh():
     endpoints = EBAY_ENDPOINTS[EbayEnvironment.SANDBOX]
     token_route = respx.post(endpoints.oauth_url).mock(

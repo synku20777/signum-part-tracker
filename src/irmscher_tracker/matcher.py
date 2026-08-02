@@ -264,11 +264,11 @@ class PartMatcher:
             "Irmscher Vectra Signum",
             "Opel Signum Irmscher",
         ]
+        seen_numbers: set[str] = set()
         for part in self._config.parts:
-            # Add compact part numbers as queries
             for pn in part.part_numbers:
                 normalized = normalize_part_number(pn)
-                query = f"i{normalized[:2]} {normalized[2:4]} {normalized[4:]}"
-                if query not in queries:
-                    queries.append(pn.strip())
+                if normalized not in seen_numbers:
+                    queries.append(f"Irmscher {normalized}")
+                    seen_numbers.add(normalized)
         return queries

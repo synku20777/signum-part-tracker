@@ -274,6 +274,15 @@ def test_generic_vehicle_evidence_does_not_identify_a_part(matcher):
     assert result.has_part_specific_evidence is False
 
 
+def test_search_queries_use_one_brand_anchored_query_per_part_number(matcher):
+    queries = matcher.get_search_queries()
+
+    assert "Irmscher 3401009" in queries
+    assert "3401009" not in queries
+    assert "i3401009" not in queries
+    assert queries.count("Irmscher 3401009") == 1
+
+
 def test_tied_part_aliases_are_not_assigned_arbitrarily(matcher):
     listing = NormalizedListing(
         source=Source.SSCOM,

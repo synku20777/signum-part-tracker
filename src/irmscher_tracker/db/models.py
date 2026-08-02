@@ -166,3 +166,69 @@ class EbayDeletionNotificationRow(Base):
             name="ck_ebay_deletion_status",
         ),
     )
+
+
+class ListingImageRow(Base):
+    __tablename__ = "listing_images"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    listing_id: Mapped[int] = mapped_column(sa.ForeignKey("listings.id"), index=True)
+    source_url: Mapped[str] = mapped_column(sa.Text)
+    position: Mapped[int] = mapped_column(sa.Integer)
+    is_current: Mapped[bool] = mapped_column(sa.Boolean, default=True)
+    first_seen_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
+    last_seen_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
+
+    __table_args__ = (
+        sa.UniqueConstraint("listing_id", "source_url", name="uq_listing_image_url"),
+    )
+
+
+class ManualReviewRow(Base):
+    __tablename__ = "manual_reviews"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    listing_id: Mapped[int] = mapped_column(sa.ForeignKey("listings.id"), index=True)
+    outcome: Mapped[str] = mapped_column(sa.String)
+    selected_part_id: Mapped[str | None] = mapped_column(sa.String)
+    notes: Mapped[str | None] = mapped_column(sa.Text)
+    reviewed_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "outcome IN ('confirmed', 'rejected', 'uncertain')",
+            name="ck_manual_review_outcome",
+        ),
+    )
+
+
+class ReferenceImageRow(Base):
+    __tablename__ = "reference_images"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    listing_image_id: Mapped[int] = mapped_column(sa.ForeignKey("listing_images.id"))
+    manual_review_id: Mapped[int] = mapped_column(sa.ForeignKey("manual_reviews.id"))
+    part_id: Mapped[str] = mapped_column(sa.String, index=True)
+    label: Mapped[str] = mapped_column(sa.String)
+    local_path: Mapped[str] = mapped_column(sa.Text)
+    content_sha256: Mapped[str] = mapped_column(sa.String(64))
+    mime_type: Mapped[str] = mapped_column(sa.String)
+    width: Mapped[int] = mapped_column(sa.Integer)
+    height: Mapped[int] = mapped_column(sa.Integer)
+    notes: Mapped[str | None] = mapped_column(sa.Text)
+    is_active: Mapped[bool] = mapped_column(sa.Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
+
+    __table_args__ = (
+        sa.CheckConstraint("label IN ('positive', 'negative')", name="ck_reference_label"),
+        sa.UniqueConstraint(
+            "part_id", "label", "content_sha256", name="uq_reference_part_label_content"
+        ),
+        sa.Index(
+            "uq_reference_active_part_content",
+            "part_id",
+            "content_sha256",
+            unique=True,
+            sqlite_where=sa.text("is_active = 1"),
+        ),
+    )

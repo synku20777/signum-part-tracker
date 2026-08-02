@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 import irmscher_tracker.api.app as app_module
 from irmscher_tracker.api.app import create_app
-from irmscher_tracker.db.models import ListingRow
+from irmscher_tracker.db.models import ListingImageRow, ListingRow
 from irmscher_tracker.domain import Source, SourceSearchResult
 from irmscher_tracker.sources.base import SourceAdapter
 
@@ -76,6 +76,28 @@ def test_protected_endpoint_requires_valid_token(test_client, settings):
     assert response.json()["detail"] == "ebay scanning is disabled"
 
 
+def test_review_shell_is_public_but_review_data_is_protected(test_client, settings):
+    page = test_client.get("/review")
+    assert page.status_code == 200
+    assert settings.api_token.get_secret_value() not in page.text
+    assert page.headers["Content-Security-Policy"].startswith("default-src 'none'")
+    assert page.headers["Referrer-Policy"] == "no-referrer"
+    assert page.headers["X-Frame-Options"] == "DENY"
+    assert test_client.get("/review/assets/review.js").status_code == 200
+
+    for path in ("/review/parts", "/review/progress", "/review/queue", "/review/references"):
+        response = test_client.get(path)
+        assert response.status_code == 401
+        assert response.headers["WWW-Authenticate"] == "Bearer"
+
+    response = test_client.get(
+        "/review/parts",
+        headers={"Authorization": f"Bearer {settings.api_token.get_secret_value()}"},
+    )
+    assert response.status_code == 200
+    assert any(part["id"] == "front-lip" for part in response.json())
+
+
 def test_list_listings_empty(test_client):
     assert test_client.get("/listings").json() == []
 
@@ -100,6 +122,58 @@ async def test_listing_api_serializes_missing_price(test_client, db_session):
     response = test_client.get("/listings?source=sscom")
     assert response.status_code == 200
     assert response.json()[0]["price"] is None
+
+
+@pytest.mark.asyncio
+async def test_review_queue_and_append_only_review(test_client, settings, db_session):
+    listing = _listing("review-api", "ebay", True)
+    db_session.add(listing)
+    await db_session.flush()
+    now = datetime.now(UTC)
+    db_session.add(
+        ListingImageRow(
+            listing_id=listing.id,
+            source_url="https://i.ebayimg.com/review.jpg",
+            position=0,
+            is_current=True,
+            first_seen_at=now,
+            last_seen_at=now,
+        )
+    )
+    await db_session.commit()
+    headers = {"Authorization": f"Bearer {settings.api_token.get_secret_value()}"}
+    queue = test_client.get("/review/queue", headers=headers)
+    assert queue.status_code == 200
+    assert queue.json()["total"] == 1
+    assert (
+        test_client.get("/review/queue?match_state=matched", headers=headers).json()["total"] == 0
+    )
+    assert (
+        test_client.get("/review/queue?match_state=unmatched", headers=headers).json()["total"]
+        == 1
+    )
+
+    invalid = test_client.post(
+        f"/review/listings/{listing.id}",
+        headers=headers,
+        json={"outcome": "confirmed", "selected_part_id": "missing-part"},
+    )
+    assert invalid.status_code == 400
+    created = test_client.post(
+        f"/review/listings/{listing.id}",
+        headers=headers,
+        json={"outcome": "uncertain", "notes": "  inspect later  "},
+    )
+    assert created.status_code == 200
+    assert created.json()["review"]["notes"] == "inspect later"
+    progress = test_client.get("/review/progress", headers=headers).json()
+    assert progress["reviewed_listings"] == 1
+    assert progress["outcomes"]["uncertain"] == 1
+    assert len(progress["parts"]) == 9
+    assert "seller" not in str(progress)
+    detail = test_client.get(f"/review/listings/{listing.id}", headers=headers).json()
+    assert detail["review_history_count"] == 1
+    assert detail["review_history"][0]["outcome"] == "uncertain"
 
 
 def test_get_listing_not_found(test_client):

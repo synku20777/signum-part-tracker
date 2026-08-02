@@ -28,6 +28,7 @@ from irmscher_tracker.domain import (
     Source,
     SourceSearchResult,
 )
+from irmscher_tracker.normalizer import extract_part_numbers
 from irmscher_tracker.sources.base import SourceAdapter
 from irmscher_tracker.sources.ebay_client import (
     EBAY_ENDPOINTS,
@@ -117,6 +118,8 @@ class EbayAdapter(SourceAdapter):
             try:
                 items, complete = await self._search_single(query, token)
                 for item in items:
+                    if not self._has_local_evidence(item, query):
+                        continue
                     listing = self._normalize(item)
                     hit = seen.setdefault(
                         listing.external_id,
@@ -139,6 +142,16 @@ class EbayAdapter(SourceAdapter):
             query_errors=query_errors,
             discovery_complete=not query_errors,
             enrichment_complete=True,
+        )
+
+    @staticmethod
+    def _has_local_evidence(item: dict[str, Any], query: str) -> bool:
+        text = f"{item.get('title', '')} {item.get('shortDescription', '')}"
+        if set(extract_part_numbers(query)) & set(extract_part_numbers(text)):
+            return True
+        normalized = text.casefold()
+        return "irmscher" in normalized and any(
+            model in normalized for model in ("signum", "vectra")
         )
 
     async def close(self) -> None:

@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Irmscher review</title>
+  <link rel="stylesheet" href="/review/assets/review.css">
+</head>
+<body>
+  <header>
+    <div>
+      <p class="eyebrow">Signum part tracker</p>
+      <h1>Manual image review</h1>
+    </div>
+    <form id="token-form" class="token-form">
+      <label for="token">API token</label>
+      <input id="token" name="token" type="password" autocomplete="off" required>
+      <button type="submit">Unlock</button>
+      <button type="button" id="forget-token" class="quiet">Forget</button>
+    </form>
+  </header>
+
+  <main>
+    <nav aria-label="Review sections">
+      <button class="tab active" data-panel="queue-panel">Queue</button>
+      <button class="tab" data-panel="references-panel">References</button>
+      <span id="status" role="status"></span>
+    </nav>
+
+    <section id="queue-panel" class="panel active">
+      <section id="campaign-progress" class="campaign-progress" aria-live="polite"></section>
+      <form id="queue-filters" class="filters">
+        <label>Status
+          <select name="status">
+            <option value="unreviewed">Unreviewed</option>
+            <option value="reviewed">Reviewed</option>
+            <option value="confirmed">Confirmed</option>
+            <option value="rejected">Rejected</option>
+            <option value="uncertain">Uncertain</option>
+            <option value="all">All</option>
+          </select>
+        </label>
+        <label>Source
+          <select name="source">
+            <option value="">All</option>
+            <option value="ebay">eBay</option>
+            <option value="sscom">SS.com</option>
+          </select>
+        </label>
+        <label>Match
+          <select name="match_state">
+            <option value="matched">Matched candidates</option>
+            <option value="unmatched">Broad candidates</option>
+            <option value="all">All</option>
+          </select>
+        </label>
+        <label>Part <select name="part_id" class="part-options"><option value="">All</option></select></label>
+        <label>Minimum score <input name="min_score" type="number" inputmode="numeric"></label>
+        <label>Listing state
+          <select name="is_active"><option value="true">Active</option><option value="false">Inactive</option><option value="all">All</option></select>
+        </label>
+        <label>Images
+          <select name="has_images"><option value="true">Has images</option><option value="false">No images</option><option value="all">All</option></select>
+        </label>
+        <button type="submit">Apply</button>
+      </form>
+      <div class="workspace">
+        <aside>
+          <div id="queue-summary" class="summary"></div>
+          <div id="queue" class="queue" aria-live="polite"></div>
+        </aside>
+        <article id="detail" class="detail empty">
+          <p>Select a listing to review it.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="references-panel" class="panel">
+      <form id="reference-filters" class="filters">
+        <label>Part <select name="part_id" class="part-options"><option value="">All</option></select></label>
+        <label>Label
+          <select name="label"><option value="">All</option><option>positive</option><option>negative</option></select>
+        </label>
+        <label>State
+          <select name="is_active"><option value="">All</option><option value="true">Active</option><option value="false">Inactive</option></select>
+        </label>
+        <button type="submit">Apply</button>
+      </form>
+      <div id="references" class="gallery"></div>
+    </section>
+  </main>
+  <script src="/review/assets/review.js" defer></script>
+</body>
+</html>

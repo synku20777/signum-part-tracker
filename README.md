@@ -3,6 +3,8 @@
 A personal Opel Signum Irmscher parts tracker. It discovers listings from the
 eBay Browse API and public SS.com RSS feeds, stores current state and history in
 SQLite, applies deterministic watchlist matching, and can send Telegram alerts.
+It also includes a private manual-review page for building a sanitized,
+human-approved reference-image gallery.
 
 The supported deployment is one Docker container, one Uvicorn process, and a
 persistent `data/` directory. The tracker does not purchase items, contact
@@ -37,7 +39,8 @@ TRACKER_SSCOM_ENABLED=true
 when the token is blank, migrates the database, starts the service, and waits
 for health. Existing tokens and databases are preserved.
 
-Open <http://localhost:8000/docs> for the generated API documentation.
+Open <http://localhost:8000/docs> for API documentation or
+<http://localhost:8000/review> for the manual-review page.
 
 ## Configuration
 
@@ -95,7 +98,7 @@ Examples:
 ```bash
 ./tracker.sh scan-source sscom
 ./tracker.sh backup
-./tracker.sh restore backup_20260801_120000.sqlite
+./tracker.sh restore backup_20260801_120000.tar.gz
 ```
 
 `scan-source` submits a background run and polls it to a terminal state. Direct
@@ -106,9 +109,14 @@ tracker trigger-scan sscom
 tracker trigger-scan sscom --wait
 ```
 
-Restore accepts only a filename directly under `data/`, creates a timestamped
-pre-restore backup, stops the service, restores with SQLite's backup API, and
-restarts only after success.
+The default backup is one `.tar.gz` containing a consistent SQLite copy, the
+sanitized `references/` gallery, and a hash-verified manifest. An explicitly
+named `.sqlite` file remains supported for database-only legacy backups; it is
+incomplete once reference images exist. Restore accepts either format directly
+under `data/`, creates a full pre-restore archive, stops the service, validates
+and restores in a one-shot container, and recovers the pre-restore archive if
+the requested restore fails. A legacy SQLite restore preserves current
+reference files.
 
 ## API
 
@@ -123,11 +131,46 @@ restarts only after success.
   `WWW-Authenticate: Bearer`. The tracker has no role-based HTTP 403 case.
 - `GET` and `POST /ebay/marketplace-account-deletion` are public eBay callback
   methods and intentionally do not use the tracker bearer token.
+- `/review/parts`, `/review/queue`, `/review/listings/*`, and
+  `/review/references/*` require the same bearer token. The `/review` HTML shell
+  is public but contains no data or token.
 
 Manual and scheduled scans share one lock per source. An overlap returns HTTP
 409 with the active run ID. Feed discovery completeness controls misses;
 detail-enrichment failures make a run partial without hiding listings observed
 in complete feeds.
+
+## Manual review and reference images
+
+Open <http://localhost:8000/review>, enter `TRACKER_API_TOKEN`, and review the
+active listing queue. The token stays in that browser tab's `sessionStorage`.
+Human reviews are append-only and remain separate from deterministic matches;
+they do not change scores or send Telegram messages.
+
+Confirm, reject, or mark a listing uncertain. A confirmed listing can save
+selected images as positive references. Negative references require a target
+part. The tracker accepts only HTTPS images from the exact marketplace image
+hosts currently supported (`i.ebayimg.com` and `i.ss.com`), removes image
+metadata, and stores lossless content-addressed WebP files under
+`data/references/`. Historical listing images remain reviewable.
+
+The review page tracks a 100-listing pilot using each listing's latest review.
+It starts with deterministic matches, falls back to broad candidates when that
+queue is empty, and shows advisory positive/negative coverage gaps for every
+configured part. Guidance per part is three confirmed listings, five positive
+references, five distinct negative listings, and ten negative references.
+Reaching 100 reviews does not by itself enable visual matching.
+
+Metadata removal cannot erase names, phone numbers, email addresses, or other
+seller information visibly embedded in image pixels. Do not approve an image
+that contains contact information. The tracker does not run OCR or automatic
+pixel redaction. An eBay deletion notice clears associated review/reference
+notes but retains sanitized image pixels, labels, part assignments, and listing
+provenance under the selected retention policy.
+
+Keep this page private. If a tunnel or reverse proxy is used for eBay
+compliance, expose only `/ebay/marketplace-account-deletion`; never expose
+`/review` or its API routes.
 
 ## eBay Production compliance
 
@@ -209,6 +252,9 @@ docker compose config
   budget.
 - No Telegram alerts: verify both Telegram values and run
   `docker compose exec irmscher-tracker tracker test-notification`.
+- Missing reference files: run `tracker doctor`. It reports missing database
+  references and removes temporary image files older than one hour.
 
-Kleinanzeigen, Allegro, Ovoko, visual recognition, CAPTCHA handling, proxies,
-authentication automation, purchasing, and seller contact are out of scope.
+Kleinanzeigen, Allegro, Ovoko, automatic visual recognition, OCR, CAPTCHA
+handling, proxies, authentication automation, purchasing, and seller contact
+are out of scope.

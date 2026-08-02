@@ -14,6 +14,7 @@ dependencies = [
     "httpx>=0.27",
     "defusedxml>=0.7.1",
     "cryptography>=43.0",
+    "pillow>=11.0",
     "tzdata>=2025.2",
     "sqlalchemy[asyncio]>=2.0.30",
     "alembic>=1.13",
