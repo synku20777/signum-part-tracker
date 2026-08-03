@@ -30,8 +30,20 @@
     <section id="queue-panel" class="panel active">
       <section id="campaign-progress" class="campaign-progress" aria-live="polite"></section>
       <form id="queue-filters" class="filters">
+        <label>Queue mode
+          <select name="mode">
+            <option value="matched-high-confidence">High-confidence matches</option>
+            <option value="matched-low-confidence">Low-confidence matches</option>
+            <option value="unmatched-broad-candidates">Unmatched broad candidates</option>
+            <option value="confirmed-needs-positive-images">Confirmed needing positives</option>
+            <option value="part-needs-negatives">Parts needing negatives</option>
+            <option value="uncertain-recheck">Uncertain recheck</option>
+            <option value="all">All</option>
+          </select>
+        </label>
         <label>Status
           <select name="status">
+            <option value="">Mode default</option>
             <option value="unreviewed">Unreviewed</option>
             <option value="reviewed">Reviewed</option>
             <option value="confirmed">Confirmed</option>
@@ -49,9 +61,9 @@
         </label>
         <label>Match
           <select name="match_state">
+            <option value="all">All</option>
             <option value="matched">Matched candidates</option>
             <option value="unmatched">Broad candidates</option>
-            <option value="all">All</option>
           </select>
         </label>
         <label>Part <select name="part_id" class="part-options"><option value="">All</option></select></label>
@@ -63,6 +75,7 @@
           <select name="has_images"><option value="true">Has images</option><option value="false">No images</option><option value="all">All</option></select>
         </label>
         <button type="submit">Apply</button>
+        <details class="shortcut-help"><summary>Keyboard help</summary><span>C confirm, R reject, U uncertain, arrows move, Ctrl+Enter saves.</span></details>
       </form>
       <div class="workspace">
         <aside>

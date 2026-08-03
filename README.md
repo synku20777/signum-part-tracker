@@ -66,6 +66,11 @@ All environment variables use the `TRACKER_` prefix.
 | `TRACKER_SCAN_ON_STARTUP` | `true` | Scan each ready source at startup |
 | `TRACKER_MAX_CONSECUTIVE_MISSES` | `3` | Complete discoveries before deactivation |
 | `TRACKER_TELEGRAM_ENABLED` | `true` | Enable Telegram delivery |
+| `TRACKER_REVIEW_CAMPAIGN_TARGET` | `100` | Advisory distinct-listing review target |
+| `TRACKER_REVIEW_CONFIRMED_LISTINGS_TARGET` | `3` | Confirmed listings wanted per part |
+| `TRACKER_REVIEW_POSITIVE_REFERENCES_TARGET` | `5` | Active positive images wanted per part |
+| `TRACKER_REVIEW_NEGATIVE_LISTINGS_TARGET` | `5` | Distinct negative listings wanted per part |
+| `TRACKER_REVIEW_NEGATIVE_REFERENCES_TARGET` | `10` | Active negative images wanted per part |
 
 The SS.com feed list is in `config/sources.yaml`, mounted read-only in the
 container. The defaults cover Signum and Vectra parts and donor cars. Feed URLs
@@ -107,6 +112,9 @@ CLI use can return immediately or wait:
 ```bash
 tracker trigger-scan sscom
 tracker trigger-scan sscom --wait
+tracker review doctor
+tracker review doctor --repair
+tracker review export /app/data/exports/pilot-dataset
 ```
 
 The default backup is one `.tar.gz` containing a consistent SQLite copy, the
@@ -131,7 +139,8 @@ reference files.
   `WWW-Authenticate: Bearer`. The tracker has no role-based HTTP 403 case.
 - `GET` and `POST /ebay/marketplace-account-deletion` are public eBay callback
   methods and intentionally do not use the tracker bearer token.
-- `/review/parts`, `/review/queue`, `/review/listings/*`, and
+- `/review/parts`, `/review/progress`, `/review/dataset-readiness`,
+  `/review/integrity`, `/review/queue`, `/review/listings/*`, and
   `/review/references/*` require the same bearer token. The `/review` HTML shell
   is public but contains no data or token.
 
@@ -154,12 +163,45 @@ hosts currently supported (`i.ebayimg.com` and `i.ss.com`), removes image
 metadata, and stores lossless content-addressed WebP files under
 `data/references/`. Historical listing images remain reviewable.
 
-The review page tracks a 100-listing pilot using each listing's latest review.
-It starts with deterministic matches, falls back to broad candidates when that
-queue is empty, and shows advisory positive/negative coverage gaps for every
-configured part. Guidance per part is three confirmed listings, five positive
-references, five distinct negative listings, and ten negative references.
-Reaching 100 reviews does not by itself enable visual matching.
+The review page tracks a configurable pilot using each listing's latest review.
+Queue modes cover high- and low-confidence deterministic matches, unmatched
+broad candidates, confirmed listings needing positive images, parts needing
+negative images, and uncertain decisions needing another review. The page
+shows why each listing was selected. Filters remain in `sessionStorage` for the
+current browser tab.
+
+Use these outcomes consistently:
+
+- **Confirmed:** the selected part is identifiable from a visible part number,
+  catalogue comparison, known shape, or known donor-car evidence.
+- **Rejected:** the listing is unrelated, wrong-model, pre-facelift where
+  incompatible, replica, ordinary OEM, or does not show the target part.
+- **Uncertain:** the image angle, resolution, obstruction, or evidence is not
+  sufficient for a defensible decision.
+
+Reference images can record view, fitted/removed/catalogue context, quality,
+and obstruction. Positive references require the latest review to confirm the
+same part. Negative references require an explicit target part. Before saving
+any reference, the reviewer must confirm that the selected pixels do not
+visibly contain seller contact information. This is a human check, not OCR or
+proof that pixels contain no personal information.
+
+The default advisory guidance is three confirmed listings, five positive
+references, five distinct negative listings, and ten negative references per
+part. Reaching the campaign or coverage target does not activate visual
+matching or alerts.
+
+Run `tracker review doctor` to validate review relationships, configured part
+IDs, current image synchronization, reference paths, hashes, WebP decoding,
+dimensions, label conflicts, privacy confirmations, and seller-derived note
+text. It does not delete records. `--repair` removes only temporary reference
+files older than one hour.
+
+`tracker review export` writes active, sanitized references to a deterministic
+part/label directory with JSON and CSV manifests plus SHA-256 checksums. The
+export omits titles, URLs, marketplace external IDs, seller information,
+notes, notification data, and credentials. Integrity errors block export by
+default; `--allow-integrity-errors` still skips every invalid reference file.
 
 Metadata removal cannot erase names, phone numbers, email addresses, or other
 seller information visibly embedded in image pixels. Do not approve an image
@@ -252,9 +294,11 @@ docker compose config
   budget.
 - No Telegram alerts: verify both Telegram values and run
   `docker compose exec irmscher-tracker tracker test-notification`.
-- Missing reference files: run `tracker doctor`. It reports missing database
-  references and removes temporary image files older than one hour.
+- Review or reference problems: run `tracker review doctor`. Use `--repair`
+  only to remove stale temporary files; database rows and WebP references are
+  never automatically deleted.
 
-Kleinanzeigen, Allegro, Ovoko, automatic visual recognition, OCR, CAPTCHA
+Kleinanzeigen, Allegro, Ovoko, image embeddings, automatic visual recognition,
+OCR, CAPTCHA
 handling, proxies, authentication automation, purchasing, and seller contact
 are out of scope.

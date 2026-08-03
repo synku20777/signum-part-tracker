@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     scan_on_startup: bool = True
     search_interval_minutes: int = 30
     config_directory: Path = Path("/app/config")
+    review_campaign_target: int = Field(default=100, ge=0)
+    review_confirmed_listings_target: int = Field(default=3, ge=0)
+    review_positive_references_target: int = Field(default=5, ge=0)
+    review_negative_listings_target: int = Field(default=5, ge=0)
+    review_negative_references_target: int = Field(default=10, ge=0)
 
     @field_validator("api_token")
     @classmethod

@@ -39,6 +39,7 @@ nav .tab.active { border-color: var(--accent); color: #fff; }
 .part-progress small { display: block; margin-top: .35rem; color: var(--muted); }
 .filters { padding: .8rem; margin-bottom: 1rem; border: 1px solid var(--line); border-radius: .6rem; background: var(--panel); }
 .filters .check { display: flex; flex-direction: row; align-items: center; padding-bottom: .55rem; }
+.shortcut-help { max-width: 22rem; color: var(--muted); font-size: .8rem; }
 .workspace { display: grid; grid-template-columns: minmax(18rem, 28rem) minmax(0, 1fr); gap: 1rem; }
 aside, .detail { min-height: 65vh; border: 1px solid var(--line); border-radius: .6rem; background: var(--panel); overflow: hidden; }
 .summary { padding: .75rem; color: var(--muted); border-bottom: 1px solid var(--line); }
@@ -56,6 +57,10 @@ aside, .detail { min-height: 65vh; border: 1px solid var(--line); border-radius:
 .image-choice { position: relative; padding: .45rem; border: 1px solid var(--line); border-radius: .5rem; background: #10151b; }
 .image-choice img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #080a0d; }
 .image-choice select { width: 100%; margin-top: .4rem; }
+.image-choice .reference-active { color: var(--good); }
+.image-annotations { display: grid; grid-template-columns: 1fr 1fr; gap: .35rem; }
+.queue-reason, .review-identities, .privacy-warning { color: var(--muted); font-size: .85rem; }
+.privacy-warning { padding: .65rem; border: 1px solid var(--accent); border-radius: .45rem; }
 .review-form { display: grid; gap: .75rem; padding-top: 1rem; border-top: 1px solid var(--line); }
 .review-form textarea { width: 100%; min-height: 6rem; resize: vertical; }
 .outcomes { display: flex; gap: .4rem; }

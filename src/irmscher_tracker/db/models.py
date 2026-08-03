@@ -193,6 +193,11 @@ class ManualReviewRow(Base):
     selected_part_id: Mapped[str | None] = mapped_column(sa.String)
     notes: Mapped[str | None] = mapped_column(sa.Text)
     reviewed_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
+    previous_review_id: Mapped[int | None] = mapped_column(sa.ForeignKey("manual_reviews.id"))
+    reviewer_version: Mapped[str] = mapped_column(sa.String(32), default="legacy")
+    review_ui_version: Mapped[str] = mapped_column(sa.String(32), default="legacy")
+    decision_reason: Mapped[str | None] = mapped_column(sa.String(64))
+    created_from_queue_mode: Mapped[str] = mapped_column(sa.String(64), default="legacy")
 
     __table_args__ = (
         sa.CheckConstraint(
@@ -218,6 +223,11 @@ class ReferenceImageRow(Base):
     notes: Mapped[str | None] = mapped_column(sa.Text)
     is_active: Mapped[bool] = mapped_column(sa.Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
+    view: Mapped[str | None] = mapped_column(sa.String(32))
+    context: Mapped[str | None] = mapped_column(sa.String(16))
+    quality: Mapped[str | None] = mapped_column(sa.String(16))
+    obstruction: Mapped[str | None] = mapped_column(sa.String(16))
+    privacy_checked_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
 
     __table_args__ = (
         sa.CheckConstraint("label IN ('positive', 'negative')", name="ck_reference_label"),

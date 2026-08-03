@@ -13,19 +13,25 @@ import uvicorn
 from rich.console import Console
 from rich.logging import RichHandler
 
+from irmscher_tracker.db.engine import get_session_factory
+from irmscher_tracker.matcher import PartMatcher
 from irmscher_tracker.services.backup import (
     BackupError,
-    audit_reference_storage,
     create_backup,
     restore_backup,
 )
+from irmscher_tracker.services.review import ReferenceImageStore, ReviewService
+from irmscher_tracker.services.review_export import DatasetExportError, ReviewDatasetExporter
+from irmscher_tracker.services.review_integrity import ReviewIntegrityService
 from irmscher_tracker.settings import Settings, get_settings
 from irmscher_tracker.sources.ebay_client import EbayEnvironment
 from irmscher_tracker.sources.sscom import load_feed_urls
 
 app = typer.Typer(name="tracker", help="Irmscher Parts Tracker CLI")
 db_app = typer.Typer(help="Database commands")
+review_app = typer.Typer(help="Manual review commands")
 app.add_typer(db_app, name="db")
+app.add_typer(review_app, name="review")
 console = Console()
 
 
@@ -134,10 +140,15 @@ def doctor() -> None:
             settings.telegram_bot_token.get_secret_value() and settings.telegram_chat_id
         ),
     }
-    missing_references, removed_temporary_files = audit_reference_storage(
-        database_path, settings.data_directory
+    matcher = PartMatcher(settings.parts_config_path)
+    integrity = asyncio.run(
+        ReviewIntegrityService(
+            get_session_factory(settings.database_url),
+            settings.data_directory,
+            {part.id for part in matcher.parts},
+        ).check()
     )
-    checks["reference files"] = missing_references == 0
+    checks["review integrity"] = integrity.status != "error"
     health_payload: dict[str, object] = {}
     try:
         response = httpx.get(f"http://127.0.0.1:{settings.api_port}/health", timeout=5.0)
@@ -152,8 +163,8 @@ def doctor() -> None:
     for name, healthy in checks.items():
         console.print(f"{'OK' if healthy else 'MISSING'}: {name}")
     console.print(
-        f"Reference storage: missing={missing_references}, "
-        f"stale_temporary_files_removed={removed_temporary_files}"
+        f"Review integrity: status={integrity.status}, "
+        f"errors={integrity.summary.errors}, warnings={integrity.summary.warnings}"
     )
     for name, (enabled, configured) in source_states.items():
         console.print(
@@ -176,7 +187,7 @@ def doctor() -> None:
     )
     core_ready = all(
         checks[name]
-        for name in ("database", "parts config", "sources config", "API", "reference files")
+        for name in ("database", "parts config", "sources config", "API", "review integrity")
     )
     sources_ready = all(
         not enabled or configured for enabled, configured in source_states.values()
@@ -188,6 +199,77 @@ def doctor() -> None:
     )
     if not core_ready or not sources_ready or not deletion_ready:
         raise typer.Exit(code=1)
+
+
+@review_app.command("doctor")
+def review_doctor(
+    repair: bool = typer.Option(False, "--repair", help="Remove stale temporary files"),
+) -> None:
+    """Validate review records and reference storage."""
+    settings = get_settings()
+    matcher = PartMatcher(settings.parts_config_path)
+    result = asyncio.run(
+        ReviewIntegrityService(
+            get_session_factory(settings.database_url),
+            settings.data_directory,
+            {part.id for part in matcher.parts},
+        ).check(repair=repair)
+    )
+    for check in result.checks:
+        console.print(
+            f"{check.status.upper()}: {check.name} "
+            f"affected={check.affected_count} repairable={'yes' if check.repairable else 'no'}"
+        )
+    console.print(
+        f"Review integrity: status={result.status}, errors={result.summary.errors}, "
+        f"warnings={result.summary.warnings}"
+    )
+    if result.status == "error":
+        raise typer.Exit(code=1)
+
+
+@review_app.command("export")
+def review_export(
+    output_directory: str | None = typer.Argument(None),
+    allow_integrity_errors: bool = typer.Option(False, "--allow-integrity-errors"),
+) -> None:
+    """Export active sanitized reference images and deterministic manifests."""
+    settings = get_settings()
+    matcher = PartMatcher(settings.parts_config_path)
+    session_factory = get_session_factory(settings.database_url)
+    destination = (
+        Path(output_directory)
+        if output_directory
+        else Path("exports") / f"dataset_{time.strftime('%Y%m%d_%H%M%S')}"
+    )
+    if not destination.is_absolute():
+        destination = settings.data_directory / destination
+    store = ReferenceImageStore(settings.data_directory)
+    review_service = ReviewService(session_factory, matcher, store, settings)
+    integrity_service = ReviewIntegrityService(
+        session_factory,
+        settings.data_directory,
+        {part.id for part in matcher.parts},
+    )
+
+    async def run() -> Path:
+        try:
+            return await ReviewDatasetExporter(
+                session_factory,
+                settings.data_directory,
+                settings.parts_config_path,
+                matcher,
+                review_service,
+                integrity_service,
+            ).export(destination, allow_integrity_errors=allow_integrity_errors)
+        finally:
+            await store.close()
+
+    try:
+        created = asyncio.run(run())
+    except DatasetExportError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    console.print(f"Dataset exported: {created}")
 
 
 @app.command("backup")

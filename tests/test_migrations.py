@@ -31,7 +31,7 @@ def test_empty_database_migrates_to_head(monkeypatch):
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name='ebay_deletion_notifications'"
             ).fetchone()
-        assert revision == ("d4f8a2c6e9b1",)
+        assert revision == ("f1a3c5e7b9d2",)
         assert {
             "image_urls_json",
             "consecutive_misses",
@@ -182,7 +182,7 @@ def test_populated_sscom_revision_upgrades_to_deletion_revision(monkeypatch):
             ).fetchone()
             revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
         assert listing == ("legacy_seller (10, 99%)", None, None, None)
-        assert revision == ("d4f8a2c6e9b1",)
+        assert revision == ("f1a3c5e7b9d2",)
     finally:
         database.unlink(missing_ok=True)
 
@@ -218,5 +218,62 @@ def test_review_migration_backfill_skips_malformed_images(monkeypatch):
                 "SELECT source_url, position FROM listing_images ORDER BY id"
             ).fetchall()
         assert images == [("https://i.ebayimg.com/one.jpg", 0)]
+    finally:
+        database.unlink(missing_ok=True)
+
+
+def test_populated_review_revision_backfills_provenance(monkeypatch):
+    database = _database_file("review-hardening")
+    try:
+        _upgrade(monkeypatch, database, "d4f8a2c6e9b1")
+        now = "2026-08-02 12:00:00"
+        with closing(sqlite3.connect(database)) as connection:
+            connection.execute(
+                "INSERT INTO listings (id, source, external_id, title, description, url, "
+                "image_urls_json, price, currency, condition, seller_display, seller_location, "
+                "published_at, last_seen_at, source_metadata_json, detail_status, "
+                "consecutive_misses, is_active) VALUES "
+                "(1, 'ebay', 'reviewed', 'Title', '', 'https://item', "
+                "'[\"https://i.ebayimg.com/one.jpg\"]', 1, 'EUR', 'used', '', '', ?, ?, "
+                "'{\"schema_version\":1}', 'not_applicable', 0, 1)",
+                (now, now),
+            )
+            connection.execute(
+                "INSERT INTO listing_images VALUES "
+                "(1, 1, 'https://i.ebayimg.com/one.jpg', 0, 1, ?, ?)",
+                (now, now),
+            )
+            for review_id, outcome in ((1, "uncertain"), (2, "confirmed")):
+                connection.execute(
+                    "INSERT INTO manual_reviews "
+                    "(id, listing_id, outcome, selected_part_id, notes, reviewed_at) "
+                    "VALUES (?, 1, ?, 'roof-spoiler', NULL, ?)",
+                    (review_id, outcome, now),
+                )
+            connection.execute(
+                "INSERT INTO reference_images "
+                "(id, listing_image_id, manual_review_id, part_id, label, local_path, "
+                "content_sha256, mime_type, width, height, notes, is_active, created_at) "
+                "VALUES (1, 1, 2, 'roof-spoiler', 'positive', ?, ?, 'image/webp', "
+                "12, 8, NULL, 1, ?)",
+                (f"references/roof-spoiler/{'a' * 64}.webp", "a" * 64, now),
+            )
+            connection.commit()
+
+        _upgrade(monkeypatch, database, "head")
+        with closing(sqlite3.connect(database)) as connection:
+            reviews = connection.execute(
+                "SELECT id, previous_review_id, reviewer_version, review_ui_version, "
+                "decision_reason, created_from_queue_mode FROM manual_reviews ORDER BY id"
+            ).fetchall()
+            reference = connection.execute(
+                "SELECT view, context, quality, obstruction, privacy_checked_at "
+                "FROM reference_images"
+            ).fetchone()
+        assert reviews == [
+            (1, None, "legacy", "legacy", None, "legacy"),
+            (2, 1, "legacy", "legacy", None, "legacy"),
+        ]
+        assert reference == (None, None, None, None, None)
     finally:
         database.unlink(missing_ok=True)

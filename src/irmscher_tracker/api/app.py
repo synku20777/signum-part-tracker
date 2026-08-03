@@ -29,6 +29,8 @@ from irmscher_tracker.api.schemas import (
     MatchResponse,
     ReferenceImageResponse,
     ReferenceUpdateRequest,
+    ReviewDatasetReadinessResponse,
+    ReviewIntegrityResponse,
     ReviewListingDetailResponse,
     ReviewPartResponse,
     ReviewProgressResponse,
@@ -61,6 +63,7 @@ from irmscher_tracker.services.review import (
     ReviewNotFoundError,
     ReviewService,
 )
+from irmscher_tracker.services.review_integrity import ReviewIntegrityService
 from irmscher_tracker.services.search import (
     SearchService,
     SourceBusyError,
@@ -94,6 +97,7 @@ class RuntimeState:
     matcher: PartMatcher | None = None
     reference_store: ReferenceImageStore | None = None
     review_service: ReviewService | None = None
+    review_integrity_service: ReviewIntegrityService | None = None
 
 
 def _search_service(runtime: RuntimeState, notifier: TelegramNotifier | None) -> SearchService:
@@ -277,7 +281,12 @@ def create_app(
         runtime.matcher = PartMatcher(settings.parts_config_path)
         runtime.reference_store = ReferenceImageStore(settings.data_directory)
         runtime.review_service = ReviewService(
-            session_factory, runtime.matcher, runtime.reference_store
+            session_factory, runtime.matcher, runtime.reference_store, settings
+        )
+        runtime.review_integrity_service = ReviewIntegrityService(
+            session_factory,
+            settings.data_directory,
+            {part.id for part in runtime.matcher.parts},
         )
         if settings.ebay_client_id and settings.ebay_client_secret.get_secret_value():
             runtime.ebay_token_provider = EbayApplicationTokenProvider(
@@ -368,6 +377,12 @@ def create_app(
         service = runtime(request).review_service
         if service is None:
             raise HTTPException(status_code=503, detail="Review service is unavailable")
+        return service
+
+    def review_integrity(request: Request) -> ReviewIntegrityService:
+        service = runtime(request).review_integrity_service
+        if service is None:
+            raise HTTPException(status_code=503, detail="Review integrity service is unavailable")
         return service
 
     @app.exception_handler(SourceBusyError)
@@ -674,15 +689,40 @@ def create_app(
         return await reviews(request).progress()
 
     @app.get(
+        "/review/integrity",
+        response_model=ReviewIntegrityResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def review_integrity_report(request: Request) -> ReviewIntegrityResponse:
+        return await review_integrity(request).check()
+
+    @app.get(
+        "/review/dataset-readiness",
+        response_model=ReviewDatasetReadinessResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def review_dataset_readiness(request: Request) -> ReviewDatasetReadinessResponse:
+        integrity = await review_integrity(request).check()
+        return await reviews(request).dataset_readiness(integrity.status)
+
+    @app.get(
         "/review/queue",
         response_model=ReviewQueueResponse,
         dependencies=[Depends(verify_token)],
     )
     async def review_queue(
         request: Request,
-        status: Literal[
-            "all", "unreviewed", "reviewed", "confirmed", "rejected", "uncertain"
-        ] = "unreviewed",
+        mode: Literal[
+            "all",
+            "matched-high-confidence",
+            "matched-low-confidence",
+            "unmatched-broad-candidates",
+            "confirmed-needs-positive-images",
+            "part-needs-negatives",
+            "uncertain-recheck",
+        ] = "all",
+        status: Literal["all", "unreviewed", "reviewed", "confirmed", "rejected", "uncertain"]
+        | None = None,
         source: str | None = None,
         part_id: str | None = None,
         is_active: Literal["true", "false", "all"] = "true",
@@ -694,6 +734,7 @@ def create_app(
         offset: int = Query(default=0, ge=0),
     ) -> ReviewQueueResponse:
         return await reviews(request).queue(
+            mode=mode,
             status=status,
             source=source,
             part_id=part_id,

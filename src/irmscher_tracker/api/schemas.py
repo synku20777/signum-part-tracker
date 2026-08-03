@@ -6,6 +6,76 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+QueueMode = Literal[
+    "all",
+    "matched-high-confidence",
+    "matched-low-confidence",
+    "unmatched-broad-candidates",
+    "confirmed-needs-positive-images",
+    "part-needs-negatives",
+    "uncertain-recheck",
+]
+DecisionReason = Literal[
+    "exact-visible-part-number",
+    "visual-shape-match",
+    "catalogue-comparison",
+    "known-donor-car",
+    "wrong-part",
+    "wrong-model",
+    "pre-facelift",
+    "replica",
+    "ordinary-OEM-part",
+    "image-does-not-show-part",
+    "listing-no-longer-available",
+    "insufficient-angle",
+    "low-resolution",
+    "obstructed",
+    "conflicting-evidence",
+    "other",
+]
+ReferenceView = Literal[
+    "front",
+    "rear",
+    "left",
+    "right",
+    "front-three-quarter",
+    "rear-three-quarter",
+    "top",
+    "underside",
+    "detail",
+    "unknown",
+]
+ReferenceContext = Literal["fitted", "removed", "catalogue", "packaging", "unknown"]
+ReferenceQuality = Literal["good", "usable", "poor"]
+ReferenceObstruction = Literal["none", "partial", "severe"]
+
+_REASONS_BY_OUTCOME = {
+    "confirmed": {
+        "exact-visible-part-number",
+        "visual-shape-match",
+        "catalogue-comparison",
+        "known-donor-car",
+        "other",
+    },
+    "rejected": {
+        "wrong-part",
+        "wrong-model",
+        "pre-facelift",
+        "replica",
+        "ordinary-OEM-part",
+        "image-does-not-show-part",
+        "listing-no-longer-available",
+        "other",
+    },
+    "uncertain": {
+        "insufficient-angle",
+        "low-resolution",
+        "obstructed",
+        "conflicting-evidence",
+        "other",
+    },
+}
+
 
 class HealthResponse(BaseModel):
     status: Literal["ok", "degraded"]
@@ -144,6 +214,11 @@ class ManualReviewResponse(BaseModel):
     selected_part_id: str | None
     notes: str | None
     reviewed_at: datetime
+    previous_review_id: int | None
+    reviewer_version: str
+    review_ui_version: str
+    decision_reason: DecisionReason | None
+    created_from_queue_mode: str
 
 
 class ReviewMatchResponse(BaseModel):
@@ -173,6 +248,8 @@ class ReviewQueueItemResponse(BaseModel):
     effective_part_id: str | None
     latest_review: ManualReviewResponse | None
     review_history_count: int
+    queue_mode: QueueMode = "all"
+    queue_reason: str = "Matches the current filters."
 
 
 class ReviewQueueResponse(BaseModel):
@@ -210,6 +287,14 @@ class ReviewPartProgress(BaseModel):
     coverage_ready: bool
 
 
+class ReviewTargets(BaseModel):
+    campaign_reviews: int
+    confirmed_listings_per_part: int
+    positive_references_per_part: int
+    negative_listings_per_part: int
+    negative_references_per_part: int
+
+
 class ReviewProgressResponse(BaseModel):
     target_reviews: int
     reviewed_listings: int
@@ -220,6 +305,7 @@ class ReviewProgressResponse(BaseModel):
     queue: ReviewQueueProgress
     sources: list[ReviewSourceProgress]
     parts: list[ReviewPartProgress]
+    targets: ReviewTargets
 
 
 class ReferenceImageResponse(BaseModel):
@@ -237,6 +323,11 @@ class ReferenceImageResponse(BaseModel):
     is_active: bool
     created_at: datetime
     content_url: str
+    view: ReferenceView | None
+    context: ReferenceContext | None
+    quality: ReferenceQuality | None
+    obstruction: ReferenceObstruction | None
+    privacy_checked_at: datetime | None
 
 
 class ReviewListingDetailResponse(ReviewQueueItemResponse):
@@ -249,6 +340,10 @@ class ReferenceSelection(BaseModel):
     listing_image_id: int
     label: Literal["positive", "negative"]
     notes: str | None = Field(default=None, max_length=2000)
+    view: ReferenceView | None = None
+    context: ReferenceContext | None = None
+    quality: ReferenceQuality | None = None
+    obstruction: ReferenceObstruction | None = None
 
     @field_validator("notes")
     @classmethod
@@ -261,6 +356,10 @@ class ManualReviewRequest(BaseModel):
     selected_part_id: str | None = None
     notes: str | None = Field(default=None, max_length=2000)
     references: list[ReferenceSelection] = Field(default_factory=list)
+    decision_reason: DecisionReason | None = None
+    review_ui_version: str | None = Field(default=None, max_length=32)
+    created_from_queue_mode: QueueMode | None = None
+    contact_information_checked: bool = False
 
     @field_validator("selected_part_id", "notes")
     @classmethod
@@ -280,6 +379,15 @@ class ManualReviewRequest(BaseModel):
         image_ids = [reference.listing_image_id for reference in self.references]
         if len(image_ids) != len(set(image_ids)):
             raise ValueError("An image can be selected only once per review")
+        if self.references and not self.contact_information_checked:
+            raise ValueError(
+                "Confirm that selected images contain no visible seller contact details"
+            )
+        if (
+            self.decision_reason is not None
+            and self.decision_reason not in _REASONS_BY_OUTCOME[self.outcome]
+        ):
+            raise ValueError("Decision reason is not valid for the selected outcome")
         return self
 
 
@@ -293,11 +401,16 @@ class ReferenceResultResponse(BaseModel):
 class ManualReviewCreatedResponse(BaseModel):
     review: ManualReviewResponse
     references: list[ReferenceResultResponse]
+    deactivated_positive_reference_ids: list[int] = Field(default_factory=list)
 
 
 class ReferenceUpdateRequest(BaseModel):
     notes: str | None = Field(default=None, max_length=2000)
     is_active: bool | None = None
+    view: ReferenceView | None = None
+    context: ReferenceContext | None = None
+    quality: ReferenceQuality | None = None
+    obstruction: ReferenceObstruction | None = None
 
     @field_validator("notes")
     @classmethod
@@ -306,6 +419,65 @@ class ReferenceUpdateRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_update(self) -> ReferenceUpdateRequest:
-        if "notes" not in self.model_fields_set and self.is_active is None:
+        editable = {
+            "notes",
+            "is_active",
+            "view",
+            "context",
+            "quality",
+            "obstruction",
+        }
+        if not self.model_fields_set.intersection(editable):
             raise ValueError("At least one field is required")
         return self
+
+
+class ReviewIntegrityCheckResponse(BaseModel):
+    name: str
+    status: Literal["ok", "warning", "error"]
+    affected_record_ids: list[int]
+    affected_count: int
+    detail: str
+    repairable: bool
+
+
+class ReviewIntegritySummary(BaseModel):
+    errors: int
+    warnings: int
+
+
+class ReviewIntegrityResponse(BaseModel):
+    status: Literal["ok", "warning", "error"]
+    checked_at: datetime
+    summary: ReviewIntegritySummary
+    checks: list[ReviewIntegrityCheckResponse]
+
+
+class ReviewReadinessPart(BaseModel):
+    part_id: str
+    part_name: str
+    confirmed_listings: int
+    positive_references: int
+    positive_listings: int
+    negative_references: int
+    negative_listings: int
+    source_distribution: dict[str, dict[str, int]]
+    view_distribution: dict[str, int]
+    unresolved_uncertain: int
+    missing_files: int
+    duplicate_image_count: int
+    missing_requirements: list[str]
+    coverage_ready: bool
+
+
+class ReviewDatasetReadinessResponse(BaseModel):
+    reviewed_total: int
+    unreviewed_matched: int
+    unreviewed_unmatched: int
+    outcomes: ReviewOutcomeProgress
+    outcome_proportions: dict[str, float]
+    references_by_source: dict[str, int]
+    parts_without_positive_examples: list[str]
+    parts_without_negative_examples: list[str]
+    integrity_status: Literal["ok", "warning", "error"]
+    parts: list[ReviewReadinessPart]

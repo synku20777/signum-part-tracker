@@ -80,7 +80,7 @@ async def test_listing_image_sync_preserves_history_and_order(db_session):
 
 @pytest.mark.asyncio
 async def test_review_queue_history_and_reference_lifecycle(
-    session_factory, matcher, tmp_path: Path
+    session_factory, matcher, settings, tmp_path: Path
 ):
     content = _image_bytes()
 
@@ -90,7 +90,7 @@ async def test_review_queue_history_and_reference_lifecycle(
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     store = ReferenceImageStore(tmp_path, client)
-    service = ReviewService(session_factory, matcher, store)
+    service = ReviewService(session_factory, matcher, store, settings)
     async with session_factory() as session:
         listing, *_ = await ListingRepository().upsert(
             session, _listing(["https://i.ebayimg.com/item.jpg"])
@@ -126,6 +126,7 @@ async def test_review_queue_history_and_reference_lifecycle(
             outcome="confirmed",
             selected_part_id="roof-spoiler",
             notes="  useful angle  ",
+            contact_information_checked=True,
             references=[{"listing_image_id": image_id, "label": "positive"}],
         ),
     )
@@ -145,6 +146,7 @@ async def test_review_queue_history_and_reference_lifecycle(
         ManualReviewRequest(
             outcome="confirmed",
             selected_part_id="roof-spoiler",
+            contact_information_checked=True,
             references=[{"listing_image_id": image_id, "label": "positive"}],
         ),
     )
@@ -154,10 +156,12 @@ async def test_review_queue_history_and_reference_lifecycle(
         ManualReviewRequest(
             outcome="rejected",
             selected_part_id="roof-spoiler",
+            contact_information_checked=True,
             references=[{"listing_image_id": image_id, "label": "negative"}],
         ),
     )
-    assert negative.references[0].status == "conflict"
+    assert negative.references[0].status == "created"
+    assert negative.deactivated_positive_reference_ids == [reference.id]
 
     updated = await service.update_reference(
         reference.id, ReferenceUpdateRequest(notes=" revised ", is_active=False)
@@ -169,10 +173,11 @@ async def test_review_queue_history_and_reference_lifecycle(
         ManualReviewRequest(
             outcome="rejected",
             selected_part_id="roof-spoiler",
+            contact_information_checked=True,
             references=[{"listing_image_id": image_id, "label": "negative"}],
         ),
     )
-    assert negative.references[0].status == "created"
+    assert negative.references[0].status == "existing"
     with pytest.raises(ReviewConflictError):
         await service.update_reference(reference.id, ReferenceUpdateRequest(is_active=True))
 
@@ -186,9 +191,9 @@ async def test_review_queue_history_and_reference_lifecycle(
 
 @pytest.mark.asyncio
 async def test_progress_uses_latest_reviews_active_references_and_match_state(
-    session_factory, matcher, tmp_path: Path
+    session_factory, matcher, settings, tmp_path: Path
 ):
-    service = ReviewService(session_factory, matcher, ReferenceImageStore(tmp_path))
+    service = ReviewService(session_factory, matcher, ReferenceImageStore(tmp_path), settings)
     now = datetime.now(UTC)
     async with session_factory() as session:
         matched, *_ = await ListingRepository().upsert(

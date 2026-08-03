@@ -384,6 +384,10 @@ async def test_anonymization_scrubs_history_and_prevents_rehydration(db_session,
         selected_part_id="front-lip",
         notes="seller mentioned here",
         reviewed_at=datetime.now(UTC),
+        reviewer_version="manual-review-v1",
+        review_ui_version="review-ui-v2",
+        decision_reason="visual-shape-match",
+        created_from_queue_mode="matched-high-confidence",
     )
     db_session.add(review)
     await db_session.flush()
@@ -400,6 +404,11 @@ async def test_anonymization_scrubs_history_and_prevents_rehydration(db_session,
         notes="seller identity note",
         is_active=True,
         created_at=datetime.now(UTC),
+        view="front",
+        context="fitted",
+        quality="good",
+        obstruction="none",
+        privacy_checked_at=datetime.now(UTC),
     )
     db_session.add(reference)
     unrelated = sample_listing.model_copy(
@@ -441,8 +450,10 @@ async def test_anonymization_scrubs_history_and_prevents_rehydration(db_session,
     assert len(snapshot.payload_hash) == 64
     assert json.loads(alert.payload_json) == {"seller_location": "", "username": ""}
     assert review.notes is None
+    assert review.decision_reason == "visual-shape-match"
     assert reference.notes is None
     assert reference.is_active is True
+    assert reference.view == "front"
     assert deletion.status == "processed"
     assert deletion.username is None
     await db_session.refresh(unrelated_row)

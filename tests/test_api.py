@@ -85,7 +85,14 @@ def test_review_shell_is_public_but_review_data_is_protected(test_client, settin
     assert page.headers["X-Frame-Options"] == "DENY"
     assert test_client.get("/review/assets/review.js").status_code == 200
 
-    for path in ("/review/parts", "/review/progress", "/review/queue", "/review/references"):
+    for path in (
+        "/review/parts",
+        "/review/progress",
+        "/review/queue",
+        "/review/references",
+        "/review/integrity",
+        "/review/dataset-readiness",
+    ):
         response = test_client.get(path)
         assert response.status_code == 401
         assert response.headers["WWW-Authenticate"] == "Bearer"
@@ -96,6 +103,11 @@ def test_review_shell_is_public_but_review_data_is_protected(test_client, settin
     )
     assert response.status_code == 200
     assert any(part["id"] == "front-lip" for part in response.json())
+    headers = {"Authorization": f"Bearer {settings.api_token.get_secret_value()}"}
+    assert test_client.get("/review/integrity", headers=headers).json()["status"] == "ok"
+    readiness = test_client.get("/review/dataset-readiness", headers=headers)
+    assert readiness.status_code == 200
+    assert len(readiness.json()["parts"]) == 9
 
 
 def test_list_listings_empty(test_client):
