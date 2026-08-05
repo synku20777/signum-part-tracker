@@ -15,4 +15,5 @@ services:
     environment:
       TRACKER_DATABASE_URL: sqlite+aiosqlite:////app/data/tracker.db
       TRACKER_CONFIG_DIRECTORY: /app/config
+      HF_HOME: /app/data/models/huggingface
     stop_grace_period: 30s

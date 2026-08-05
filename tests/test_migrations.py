@@ -4,6 +4,7 @@ from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from alembic import command
 from alembic.config import Config
 
@@ -31,7 +32,7 @@ def test_empty_database_migrates_to_head(monkeypatch):
                 "SELECT name FROM sqlite_master WHERE type='table' "
                 "AND name='ebay_deletion_notifications'"
             ).fetchone()
-        assert revision == ("f1a3c5e7b9d2",)
+        assert revision == ("a2c4e6f8b0d3",)
         assert {
             "image_urls_json",
             "consecutive_misses",
@@ -52,7 +53,81 @@ def test_empty_database_migrates_to_head(monkeypatch):
                 row[0]
                 for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
             }
-        assert {"listing_images", "manual_reviews", "reference_images"} <= review_tables
+        assert {
+            "listing_images",
+            "manual_reviews",
+            "reference_images",
+            "vision_runs",
+            "image_embeddings",
+            "visual_matches",
+        } <= review_tables
+    finally:
+        database.unlink(missing_ok=True)
+
+
+def test_vision_migration_enforces_single_run_and_embedding_owner(monkeypatch):
+    database = _database_file("vision-constraints")
+    try:
+        _upgrade(monkeypatch, database, "head")
+        now = "2026-08-03 12:00:00"
+        with closing(sqlite3.connect(database)) as connection:
+            connection.execute(
+                "INSERT INTO vision_runs (run_type, status, requested_count, processed_count, "
+                "skipped_count, failed_count, errors_json, started_at) "
+                "VALUES ('listing_scan', 'running', 0, 0, 0, 0, '[]', ?)",
+                (now,),
+            )
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO vision_runs (run_type, status, requested_count, "
+                    "processed_count, skipped_count, failed_count, errors_json, started_at) "
+                    "VALUES ('evaluation', 'running', 0, 0, 0, 0, '[]', ?)",
+                    (now,),
+                )
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO image_embeddings (listing_image_id, reference_image_id, "
+                    "owner_type, content_sha256, model_id, model_revision, model_fingerprint, "
+                    "preprocessing_version, embedding_dim, dtype, vector_blob, created_at) "
+                    "VALUES (NULL, NULL, 'listing', ?, 'model', 'revision', ?, 'v1', 2, "
+                    "'float32', ?, ?)",
+                    ("a" * 64, "f" * 64, b"12345678", now),
+                )
+    finally:
+        database.unlink(missing_ok=True)
+
+
+def test_vision_migration_enforces_embedding_cache_uniqueness(monkeypatch):
+    database = _database_file("vision-uniqueness")
+    try:
+        _upgrade(monkeypatch, database, "head")
+        now = "2026-08-03 12:00:00"
+        with closing(sqlite3.connect(database)) as connection:
+            connection.execute(
+                "INSERT INTO listings (id, source, external_id, title, description, url, "
+                "image_urls_json, price, currency, condition, seller_display, seller_location, "
+                "published_at, last_seen_at, source_metadata_json, detail_status, "
+                "consecutive_misses, is_active) VALUES "
+                "(1, 'ebay', 'vision', 'Title', '', 'https://item', '[]', NULL, 'EUR', "
+                "'used', '', '', ?, ?, '{\"schema_version\":1}', 'not_applicable', 0, 1)",
+                (now, now),
+            )
+            connection.execute(
+                "INSERT INTO listing_images VALUES "
+                "(1, 1, 'https://i.ebayimg.com/image.webp', 0, 1, ?, ?)",
+                (now, now),
+            )
+            values = (1, "a" * 64, "f" * 64, b"\x00\x00\x80?\x00\x00\x00\x00", now)
+            statement = (
+                "INSERT INTO image_embeddings (listing_image_id, reference_image_id, "
+                "owner_type, content_sha256, model_id, model_revision, model_fingerprint, "
+                "preprocessing_version, embedding_dim, dtype, vector_blob, created_at) "
+                "VALUES (?, NULL, 'listing', ?, 'model', 'revision', ?, 'v1', 2, "
+                "'float32', ?, ?)"
+            )
+            connection.execute(statement, values)
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(statement, values)
     finally:
         database.unlink(missing_ok=True)
 
@@ -182,7 +257,7 @@ def test_populated_sscom_revision_upgrades_to_deletion_revision(monkeypatch):
             ).fetchone()
             revision = connection.execute("SELECT version_num FROM alembic_version").fetchone()
         assert listing == ("legacy_seller (10, 99%)", None, None, None)
-        assert revision == ("f1a3c5e7b9d2",)
+        assert revision == ("a2c4e6f8b0d3",)
     finally:
         database.unlink(missing_ok=True)
 

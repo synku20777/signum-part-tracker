@@ -41,13 +41,16 @@ from irmscher_tracker.api.schemas import (
     ReviewReadinessPart,
     ReviewSourceProgress,
     ReviewTargets,
+    VisualEvidenceResponse,
 )
 from irmscher_tracker.db.models import (
+    ImageEmbeddingRow,
     ListingImageRow,
     ListingRow,
     ManualReviewRow,
     PartMatchRow,
     ReferenceImageRow,
+    VisualMatchRow,
 )
 from irmscher_tracker.matcher import PartMatcher
 from irmscher_tracker.settings import Settings
@@ -111,7 +114,7 @@ class ReferenceImageStore:
                         body.extend(chunk)
                         if len(body) > _MAX_BODY_BYTES:
                             raise ReferenceImageError("Image exceeds the 10 MiB limit")
-                    return await asyncio.to_thread(self._sanitize, bytes(body))
+                    return await asyncio.to_thread(self.sanitize, bytes(body))
         except ReferenceImageError:
             raise
         except (httpx.HTTPError, OSError) as exc:
@@ -135,7 +138,7 @@ class ReferenceImageStore:
         return value
 
     @staticmethod
-    def _sanitize(body: bytes) -> SanitizedImage:
+    def sanitize(body: bytes) -> SanitizedImage:
         try:
             with Image.open(io.BytesIO(body)) as original:
                 if original.format not in {"JPEG", "PNG", "WEBP"}:
@@ -246,6 +249,11 @@ class ReviewService:
         max_score: int | None = None,
         has_images: bool | None = True,
         match_state: str = "all",
+        visual_part_id: str | None = None,
+        min_positive_similarity: float | None = None,
+        min_similarity_margin: float | None = None,
+        evidence_status: str | None = None,
+        model_fingerprint: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> ReviewQueueResponse:
@@ -306,6 +314,43 @@ class ReviewService:
                 continue
             if match_state == "unmatched" and item.deterministic_match is not None:
                 continue
+            visual = [
+                evidence
+                for evidence in item.visual_evidence
+                if (visual_part_id is None or evidence.part_id == visual_part_id)
+                and (
+                    min_positive_similarity is None
+                    or (
+                        evidence.positive_similarity is not None
+                        and evidence.positive_similarity >= min_positive_similarity
+                    )
+                )
+                and (
+                    min_similarity_margin is None
+                    or (
+                        evidence.similarity_margin is not None
+                        and evidence.similarity_margin >= min_similarity_margin
+                    )
+                )
+                and (evidence_status is None or evidence.status == evidence_status)
+                and (model_fingerprint is None or evidence.model_fingerprint == model_fingerprint)
+            ]
+            if (
+                any(
+                    value is not None
+                    for value in (
+                        visual_part_id,
+                        min_positive_similarity,
+                        min_similarity_margin,
+                        evidence_status,
+                        model_fingerprint,
+                    )
+                )
+                and not visual
+            ):
+                continue
+            if visual != item.visual_evidence:
+                item = item.model_copy(update={"visual_evidence": visual})
             filtered.append(item.model_copy(update={"queue_mode": mode, "queue_reason": reason}))
         filtered.sort(
             key=lambda item: self._queue_sort_key(item, mode, negative_by_part),
@@ -384,6 +429,15 @@ class ReviewService:
                 )
                 return f"Part needs {remaining} more active negative reference images."
             return None
+        if mode == "visual-candidates":
+            if item.visual_evidence:
+                strongest = item.visual_evidence[0]
+                return (
+                    f"Experimental visual ranking proposes {strongest.part_name}; "
+                    f"positive similarity {_format_similarity(strongest.positive_similarity)}, "
+                    f"margin {_format_similarity(strongest.similarity_margin)}."
+                )
+            return None
         review = item.latest_review
         if review is not None and review.outcome == "uncertain":
             return "Earlier uncertain decision is ready for another review."
@@ -401,6 +455,19 @@ class ReviewService:
             return (
                 -negative_by_part[item.effective_part_id or ""],
                 item.deterministic_match.total_score if item.deterministic_match else 0,
+                item.first_seen_at,
+                item.listing_id,
+            )
+        if mode == "visual-candidates":
+            strongest = item.visual_evidence[0] if item.visual_evidence else None
+            return (
+                strongest is not None,
+                strongest.similarity_margin
+                if strongest and strongest.similarity_margin is not None
+                else -2.0,
+                strongest.positive_similarity
+                if strongest and strongest.positive_similarity is not None
+                else -2.0,
                 item.first_seen_at,
                 item.listing_id,
             )
@@ -619,6 +686,44 @@ class ReviewService:
             review_history=[self._review_response(row) for row in reviews],
             references=references,
         )
+
+    async def visual_matches(
+        self,
+        *,
+        listing_id: int | None = None,
+        part_id: str | None = None,
+        status: str | None = None,
+        model_fingerprint: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[VisualEvidenceResponse]:
+        async with self._session_factory() as session:
+            stmt = (
+                select(ListingRow)
+                .join(ListingImageRow, ListingImageRow.listing_id == ListingRow.id)
+                .join(VisualMatchRow, VisualMatchRow.listing_image_id == ListingImageRow.id)
+            )
+            if listing_id is not None:
+                stmt = stmt.where(ListingRow.id == listing_id)
+            listings = list((await session.execute(stmt.distinct())).scalars())
+            items = await self._queue_items(session, listings, current_images_only=False)
+        values = [evidence for item in items for evidence in item.visual_evidence]
+        values = [
+            evidence
+            for evidence in values
+            if (part_id is None or evidence.part_id == part_id)
+            and (status is None or evidence.status == status)
+            and (model_fingerprint is None or evidence.model_fingerprint == model_fingerprint)
+        ]
+        values.sort(
+            key=lambda evidence: (
+                evidence.rank_for_listing,
+                -(evidence.similarity_margin or -2.0),
+                evidence.part_id,
+                evidence.match_id,
+            )
+        )
+        return values[offset : offset + limit]
 
     async def submit(
         self, listing_id: int, request: ManualReviewRequest
@@ -994,6 +1099,27 @@ class ReviewService:
                 )
             ).scalars()
         )
+        visual_rows = (
+            await session.execute(
+                select(VisualMatchRow, ListingImageRow)
+                .join(ListingImageRow, ListingImageRow.id == VisualMatchRow.listing_image_id)
+                .where(ListingImageRow.listing_id.in_(listing_ids))
+                .order_by(
+                    ListingImageRow.listing_id,
+                    VisualMatchRow.rank_for_listing,
+                    VisualMatchRow.part_id,
+                )
+            )
+        ).all()
+        embeddings = list(
+            (
+                await session.execute(
+                    select(ImageEmbeddingRow)
+                    .where(ImageEmbeddingRow.listing_image_id.in_([image.id for image in images]))
+                    .order_by(ImageEmbeddingRow.id.desc())
+                )
+            ).scalars()
+        )
         images_by_listing: dict[int, list[ListingImageRow]] = {}
         for image in images:
             images_by_listing.setdefault(image.listing_id, []).append(image)
@@ -1001,6 +1127,20 @@ class ReviewService:
         reviews_by_listing: dict[int, list[ManualReviewRow]] = {}
         for review in reviews:
             reviews_by_listing.setdefault(review.listing_id, []).append(review)
+        embedding_by_image_model: dict[tuple[int, str], ImageEmbeddingRow] = {}
+        for embedding in embeddings:
+            if embedding.listing_image_id is not None:
+                embedding_by_image_model.setdefault(
+                    (embedding.listing_image_id, embedding.model_fingerprint), embedding
+                )
+        visual_by_listing: dict[int, list[VisualEvidenceResponse]] = {}
+        for visual, image in visual_rows:
+            model_embedding = embedding_by_image_model.get((image.id, visual.model_fingerprint))
+            if model_embedding is None:
+                continue
+            visual_by_listing.setdefault(image.listing_id, []).append(
+                self._visual_response(visual, image, model_embedding)
+            )
 
         return [
             self._queue_item(
@@ -1008,6 +1148,7 @@ class ReviewService:
                 images_by_listing.get(listing.id, []),
                 matches_by_listing.get(listing.id),
                 reviews_by_listing.get(listing.id, []),
+                visual_by_listing.get(listing.id, []),
             )
             for listing in listings
         ]
@@ -1018,6 +1159,7 @@ class ReviewService:
         images: list[ListingImageRow],
         match: PartMatchRow | None,
         reviews: list[ManualReviewRow],
+        visual_evidence: list[VisualEvidenceResponse],
     ) -> ReviewQueueItemResponse:
         latest = reviews[0] if reviews else None
         match_response = self._match_response(match) if match else None
@@ -1040,6 +1182,35 @@ class ReviewService:
             or (match.part_id if match else None),
             latest_review=self._review_response(latest) if latest else None,
             review_history_count=len(reviews),
+            visual_evidence=visual_evidence,
+        )
+
+    def _visual_response(
+        self,
+        row: VisualMatchRow,
+        image: ListingImageRow,
+        embedding: ImageEmbeddingRow,
+    ) -> VisualEvidenceResponse:
+        names = dict(self._parts)
+        return VisualEvidenceResponse(
+            match_id=row.id,
+            listing_image_id=image.id,
+            listing_image_url=image.source_url,
+            part_id=row.part_id,
+            part_name=names.get(row.part_id, row.part_id),
+            model_fingerprint=row.model_fingerprint,
+            model_id=embedding.model_id,
+            model_revision=embedding.model_revision,
+            best_positive_reference_id=row.best_positive_reference_id,
+            best_negative_reference_id=row.best_negative_reference_id,
+            positive_similarity=row.positive_similarity,
+            negative_similarity=row.negative_similarity,
+            similarity_margin=row.similarity_margin,
+            positive_reference_count=row.positive_reference_count,
+            negative_reference_count=row.negative_reference_count,
+            rank_for_listing=row.rank_for_listing,
+            status=row.status,  # type: ignore[arg-type]
+            computed_at=row.computed_at,
         )
 
     @staticmethod
@@ -1134,3 +1305,7 @@ class ReviewService:
             obstruction=row.obstruction,  # type: ignore[arg-type]
             privacy_checked_at=row.privacy_checked_at,
         )
+
+
+def _format_similarity(value: float | None) -> str:
+    return "unavailable" if value is None else f"{value:.4f}"

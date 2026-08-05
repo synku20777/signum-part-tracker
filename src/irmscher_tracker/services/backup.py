@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from irmscher_tracker import __version__
 
-_FORMAT_VERSION = 1
+_FORMAT_VERSION = 2
 _CONTENT_NAME = "tracker.sqlite"
 _MANIFEST_NAME = "manifest.json"
 _MAX_ARCHIVE_MEMBERS = 100_000
@@ -47,12 +47,17 @@ def create_backup(database: Path, data_directory: Path, destination: Path) -> No
         database_copy = temporary / _CONTENT_NAME
         sqlite_backup(database, database_copy)
         reference_files = _reference_files(data_directory / "references")
+        evaluation_files = _evaluation_files(data_directory / "vision" / "evaluations")
         manifest = {
             "format_version": _FORMAT_VERSION,
             "created_at": datetime.now(UTC).isoformat(),
             "application_version": __version__,
             "database_sha256": _sha256_file(database_copy),
             "reference_file_count": len(reference_files),
+            "vision_evaluation_file_count": len(evaluation_files),
+            "vision_evaluation_sha256": {
+                file.name: _sha256_file(file) for file in evaluation_files
+            },
         }
         descriptor, archive_name = tempfile.mkstemp(
             prefix=".backup-", suffix=".tmp", dir=data_directory
@@ -77,6 +82,12 @@ def create_backup(database: Path, data_directory: Path, destination: Path) -> No
                         ).as_posix(),
                         recursive=False,
                     )
+                for file in evaluation_files:
+                    bundle.add(
+                        file,
+                        arcname=(Path("vision") / "evaluations" / file.name).as_posix(),
+                        recursive=False,
+                    )
             os.replace(archive, destination)
         finally:
             archive.unlink(missing_ok=True)
@@ -94,27 +105,43 @@ def restore_backup(source: Path, database: Path, data_directory: Path) -> None:
         _extract_validated(source, temporary)
         restored_database = temporary / _CONTENT_NAME
         restored_references = temporary / "references"
+        restored_evaluations = temporary / "vision" / "evaluations"
         _validate_database(restored_database)
 
         current_references = data_directory / "references"
         previous_references = data_directory / f".references-pre-restore-{uuid4().hex}"
+        current_evaluations = data_directory / "vision" / "evaluations"
+        previous_evaluations = data_directory / f".evaluations-pre-restore-{uuid4().hex}"
         if current_references.exists():
             os.replace(current_references, previous_references)
+        if current_evaluations.exists():
+            os.replace(current_evaluations, previous_evaluations)
         try:
             if restored_references.exists():
                 os.replace(restored_references, current_references)
             else:
                 current_references.mkdir()
+            current_evaluations.parent.mkdir(parents=True, exist_ok=True)
+            if restored_evaluations.exists():
+                os.replace(restored_evaluations, current_evaluations)
+            else:
+                current_evaluations.mkdir()
             sqlite_backup(restored_database, database)
         except Exception:
             if current_references.exists():
                 shutil.rmtree(current_references)
             if previous_references.exists():
                 os.replace(previous_references, current_references)
+            if current_evaluations.exists():
+                shutil.rmtree(current_evaluations)
+            if previous_evaluations.exists():
+                os.replace(previous_evaluations, current_evaluations)
             raise
         finally:
             if previous_references.exists():
                 shutil.rmtree(previous_references)
+            if previous_evaluations.exists():
+                shutil.rmtree(previous_evaluations)
 
 
 def audit_reference_storage(database: Path, data_directory: Path) -> tuple[int, int]:
@@ -156,6 +183,20 @@ def _reference_files(reference_directory: Path) -> list[Path]:
     return files
 
 
+def _evaluation_files(evaluation_directory: Path) -> list[Path]:
+    if not evaluation_directory.exists():
+        return []
+    files: list[Path] = []
+    for path in evaluation_directory.iterdir():
+        if path.suffix not in {".csv", ".json"}:
+            continue
+        if path.is_symlink():
+            raise BackupError("Vision evaluation storage contains a symbolic link")
+        if path.is_file():
+            files.append(path)
+    return sorted(files)
+
+
 def _extract_validated(source: Path, destination: Path) -> None:
     with tarfile.open(source, "r:gz") as bundle:
         members = bundle.getmembers()
@@ -165,6 +206,7 @@ def _extract_validated(source: Path, destination: Path) -> None:
             raise BackupError("Backup archive exceeds safety limits")
         names: set[str] = set()
         reference_members: list[tarfile.TarInfo] = []
+        evaluation_members: list[tarfile.TarInfo] = []
         for member in members:
             path = PurePosixPath(member.name)
             if (
@@ -178,12 +220,28 @@ def _extract_validated(source: Path, destination: Path) -> None:
                 raise BackupError("Backup archive contains an unsafe path")
             names.add(member.name)
             if member.isdir():
-                if not path.parts or path.parts[0] != "references" or len(path.parts) > 2:
+                allowed_directory = path.parts in {
+                    ("references",),
+                    ("vision",),
+                    ("vision", "evaluations"),
+                }
+                reference_directory = bool(path.parts) and (
+                    path.parts[0] == "references" and len(path.parts) == 2
+                )
+                if not allowed_directory and not reference_directory:
                     raise BackupError("Backup archive contains an unexpected directory")
                 continue
             if not member.isfile():
                 raise BackupError("Backup archive contains an unsupported entry")
             if member.name in {_MANIFEST_NAME, _CONTENT_NAME}:
+                continue
+            if (
+                len(path.parts) == 3
+                and path.parts[:2] == ("vision", "evaluations")
+                and path.suffix in {".csv", ".json"}
+                and path.name == Path(path.name).name
+            ):
+                evaluation_members.append(member)
                 continue
             if (
                 len(path.parts) != 3
@@ -198,7 +256,7 @@ def _extract_validated(source: Path, destination: Path) -> None:
             raise BackupError("Backup archive is incomplete")
 
         manifest = _read_json_member(bundle, _MANIFEST_NAME)
-        _validate_manifest(manifest, len(reference_members))
+        _validate_manifest(manifest, len(reference_members), len(evaluation_members))
         for member in members:
             if not member.isfile():
                 continue
@@ -216,6 +274,11 @@ def _extract_validated(source: Path, destination: Path) -> None:
         extracted_path = destination / PurePosixPath(member.name)
         if _sha256_file(extracted_path) != extracted_path.stem:
             raise BackupError("Reference image hash does not match its filename")
+    evaluation_hashes = manifest.get("vision_evaluation_sha256", {})
+    for member in evaluation_members:
+        extracted_path = destination / PurePosixPath(member.name)
+        if _sha256_file(extracted_path) != evaluation_hashes.get(extracted_path.name):
+            raise BackupError("Vision evaluation hash does not match its manifest")
 
 
 def _read_json_member(bundle: tarfile.TarFile, name: str) -> dict[str, Any]:
@@ -234,16 +297,19 @@ def _read_json_member(bundle: tarfile.TarFile, name: str) -> dict[str, Any]:
     return value
 
 
-def _validate_manifest(manifest: dict[str, Any], reference_count: int) -> None:
+def _validate_manifest(
+    manifest: dict[str, Any], reference_count: int, evaluation_count: int
+) -> None:
     created_at = manifest.get("created_at")
     database_hash = manifest.get("database_sha256")
+    evaluation_hashes = manifest.get("vision_evaluation_sha256")
     try:
         created = datetime.fromisoformat(created_at) if isinstance(created_at, str) else None
     except ValueError:
         created = None
     offset = created.utcoffset() if created is not None else None
     if (
-        manifest.get("format_version") != _FORMAT_VERSION
+        manifest.get("format_version") not in {1, _FORMAT_VERSION}
         or created is None
         or offset is None
         or offset.total_seconds() != 0
@@ -252,6 +318,26 @@ def _validate_manifest(manifest: dict[str, Any], reference_count: int) -> None:
         or len(database_hash) != 64
         or any(character not in "0123456789abcdef" for character in database_hash)
         or manifest.get("reference_file_count") != reference_count
+        or (
+            manifest.get("format_version") == _FORMAT_VERSION
+            and manifest.get("vision_evaluation_file_count") != evaluation_count
+        )
+        or (
+            manifest.get("format_version") == _FORMAT_VERSION
+            and (
+                not isinstance(evaluation_hashes, dict)
+                or len(evaluation_hashes) != evaluation_count
+                or any(
+                    not isinstance(name, str)
+                    or Path(name).name != name
+                    or not isinstance(digest, str)
+                    or len(digest) != 64
+                    or any(character not in "0123456789abcdef" for character in digest)
+                    for name, digest in evaluation_hashes.items()
+                )
+            )
+        )
+        or (manifest.get("format_version") == 1 and evaluation_count != 0)
     ):
         raise BackupError("Backup manifest is invalid")
 

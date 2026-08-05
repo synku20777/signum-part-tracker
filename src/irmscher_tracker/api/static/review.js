@@ -1,6 +1,6 @@
 "use strict";
 
-const UI_VERSION = "review-ui-v2";
+const UI_VERSION = "review-ui-v3";
 const FILTER_KEY = "reviewQueueFilters";
 const state = {
   token: sessionStorage.getItem("trackerToken") || "",
@@ -16,6 +16,7 @@ const element = (tag, className, text) => {
 const setStatus = (message) => { byId("status").textContent = message; };
 const formatPrice = (value, currency) => value == null ? "Price unavailable" : `${value} ${currency}`;
 const formatDate = (value) => value ? new Date(value).toLocaleString() : "Unknown";
+const formatSimilarity = (value) => value == null ? "unavailable" : Number(value).toFixed(4);
 
 async function api(path, options = {}) {
   if (!state.token) throw new Error("Enter the API token to load review data.");
@@ -25,7 +26,10 @@ async function api(path, options = {}) {
   const response = await fetch(path, { ...options, headers, cache: "no-store" });
   if (!response.ok) {
     let detail = `${response.status} ${response.statusText}`;
-    try { detail = (await response.json()).detail || detail; } catch (_) { /* not JSON */ }
+    try {
+      const payload = await response.json();
+      detail = typeof payload.detail === "string" ? payload.detail : payload.detail?.message || detail;
+    } catch (_) { /* not JSON */ }
     throw new Error(detail);
   }
   return response.status === 204 ? null : response.json();
@@ -164,6 +168,10 @@ function renderQueue() {
     body.append(element("strong", "", item.title));
     body.append(element("small", "", `${formatPrice(item.price, item.currency)} · score ${item.deterministic_match?.total_score ?? "—"}`));
     body.append(element("small", "", `${item.source} · ${item.latest_review?.outcome ?? "unreviewed"}`));
+    if (item.visual_evidence?.length) {
+      const visual = item.visual_evidence[0];
+      body.append(element("small", "visual-summary", `visual: ${visual.part_name} · positive ${formatSimilarity(visual.positive_similarity)} · margin ${formatSimilarity(visual.similarity_margin)}`));
+    }
     body.append(element("small", "queue-reason", item.queue_reason));
     card.append(body); card.addEventListener("click", () => openListing(index)); queue.append(card);
   });
@@ -202,6 +210,70 @@ function decisionReasonSelect(outcome, selected) {
   return select;
 }
 
+function visualReference(referenceId, label) {
+  const panel = element("div", "visual-image");
+  panel.append(element("strong", "", label));
+  if (!referenceId) {
+    panel.append(element("p", "", "No reference available"));
+    return panel;
+  }
+  const url = `/review/references/${referenceId}/content`;
+  const preview = image("", label); preview.removeAttribute("src");
+  authenticatedImage(url, preview).catch(() => { preview.alt = "Reference image unavailable"; });
+  const open = element("button", "quiet", "Open larger"); open.type = "button";
+  open.addEventListener("click", () => openAuthenticatedImage(url));
+  panel.append(preview, open);
+  return panel;
+}
+
+function renderVisualEvidence(item) {
+  const section = element("section", "visual-evidence");
+  section.append(element("h3", "", "Visual evidence"));
+  section.append(element("p", "experimental", "Visual evidence is experimental. Similarity is a retrieval score, not a probability or confidence."));
+  const actions = element("div", "visual-actions");
+  const analyze = element("button", "", "Analyze this listing"); analyze.type = "button";
+  analyze.addEventListener("click", () => analyzeListing(item.listing_id, false));
+  const refresh = element("button", "quiet", "Refresh visual evidence"); refresh.type = "button";
+  refresh.addEventListener("click", () => analyzeListing(item.listing_id, true));
+  actions.append(analyze, refresh); section.append(actions);
+  if (!item.visual_evidence?.length) {
+    section.append(element("p", "", "No visual evidence has been generated for this listing."));
+    return section;
+  }
+  const visual = item.visual_evidence[0];
+  const summary = element("div", "visual-summary-grid");
+  [
+    ["Proposed part", visual.part_name],
+    ["Positive similarity", formatSimilarity(visual.positive_similarity)],
+    ["Negative similarity", formatSimilarity(visual.negative_similarity)],
+    ["Margin", formatSimilarity(visual.similarity_margin)],
+    ["References", `${visual.positive_reference_count} positive · ${visual.negative_reference_count} negative`],
+    ["Evidence status", visual.status],
+    ["Model", `${visual.model_id} @ ${visual.model_revision.slice(0, 12)}`],
+    ["Fingerprint", visual.model_fingerprint.slice(0, 12)],
+  ].forEach(([label, value]) => {
+    const field = element("p");
+    field.append(element("strong", "", `${label}: `), document.createTextNode(value));
+    summary.append(field);
+  });
+  section.append(summary);
+  const images = element("div", "visual-images");
+  const query = element("div", "visual-image"); query.append(element("strong", "", "Listing query image"));
+  const queryLink = element("a"); queryLink.href = visual.listing_image_url; queryLink.target = "_blank"; queryLink.rel = "noopener noreferrer";
+  queryLink.append(image(visual.listing_image_url, "Listing query image")); query.append(queryLink);
+  images.append(
+    query,
+    visualReference(visual.best_positive_reference_id, "Closest positive reference"),
+    visualReference(visual.best_negative_reference_id, "Closest negative reference"),
+  );
+  section.append(images);
+  const alternatives = element("details", "visual-alternatives");
+  alternatives.append(element("summary", "", `All ranked parts (${item.visual_evidence.length})`));
+  item.visual_evidence.forEach((evidence) => alternatives.append(element("p", "", `#${evidence.rank_for_listing} ${evidence.part_name}: positive ${formatSimilarity(evidence.positive_similarity)}, negative ${formatSimilarity(evidence.negative_similarity)}, margin ${formatSimilarity(evidence.similarity_margin)} (${evidence.status})`)));
+  section.append(alternatives);
+  return section;
+}
+
 function renderDetail(item) {
   const root = byId("detail"); root.classList.remove("empty"); root.replaceChildren();
   const head = element("div", "detail-head"); const title = element("div");
@@ -219,7 +291,9 @@ function renderDetail(item) {
     item.deterministic_match.reasons.forEach((reason) => match.append(element("span", "pill", `${reason.rule}: ${reason.points}`)));
     root.append(match);
   }
-  root.append(element("p", "review-identities", `Human-selected part: ${item.latest_review?.selected_part_id || "none"} · Effective part: ${item.effective_part_id || "none"}`));
+  const human = element("section"); human.append(element("h3", "", "Human evidence"));
+  human.append(element("p", "review-identities", `Latest outcome: ${item.latest_review?.outcome || "unreviewed"} · Human-selected part: ${item.latest_review?.selected_part_id || "none"} · Effective part: ${item.effective_part_id || "none"}`));
+  root.append(human, renderVisualEvidence(item));
 
   const form = element("form", "review-form"); form.dataset.listingId = item.listing_id;
   const strip = element("div", "image-strip");
@@ -307,6 +381,35 @@ async function authenticatedImage(url, target) {
   if (!response.ok) throw new Error("Reference image unavailable");
   const blobUrl = URL.createObjectURL(await response.blob()); target.src = blobUrl;
   target.addEventListener("load", () => URL.revokeObjectURL(blobUrl), { once: true });
+}
+
+async function openAuthenticatedImage(url) {
+  try {
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${state.token}` }, cache: "no-store" });
+    if (!response.ok) throw new Error("Reference image unavailable");
+    const blobUrl = URL.createObjectURL(await response.blob());
+    window.open(blobUrl, "_blank", "noopener,noreferrer");
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+  } catch (error) { setStatus(error.message); }
+}
+
+async function analyzeListing(listingId, force) {
+  try {
+    setStatus(force ? "Refreshing visual evidence…" : "Analyzing listing…");
+    const accepted = await api(`/vision/listings/${listingId}/analyze`, { method: "POST", body: JSON.stringify({ force }) });
+    while (true) {
+      const run = await api(`/vision/runs/${accepted.vision_run_id}`);
+      if (["completed", "partial", "failed", "interrupted"].includes(run.status)) {
+        if (["failed", "interrupted"].includes(run.status)) throw new Error(`Vision run ${run.status}`);
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    state.detail = await api(`/review/listings/${listingId}`);
+    state.detail.queue_mode = byId("queue-filters").elements.mode.value;
+    state.detail.queue_reason = "Visual evidence refreshed.";
+    renderDetail(state.detail); setStatus("Visual evidence ready");
+  } catch (error) { setStatus(error.message); }
 }
 
 async function loadReferences() {

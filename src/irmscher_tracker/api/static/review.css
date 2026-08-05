@@ -60,6 +60,16 @@ aside, .detail { min-height: 65vh; border: 1px solid var(--line); border-radius:
 .image-choice .reference-active { color: var(--good); }
 .image-annotations { display: grid; grid-template-columns: 1fr 1fr; gap: .35rem; }
 .queue-reason, .review-identities, .privacy-warning { color: var(--muted); font-size: .85rem; }
+.visual-summary { color: #b8a6ff !important; }
+.visual-evidence { margin: 1rem 0; padding: .8rem; border: 1px solid #594a8a; border-radius: .6rem; background: #151326; }
+.experimental { color: #d2c7ff; }
+.visual-actions { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: .75rem; }
+.visual-summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .25rem 1rem; }
+.visual-summary-grid p { margin-bottom: .35rem; }
+.visual-images { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .6rem; margin-top: .7rem; }
+.visual-image { display: grid; gap: .35rem; align-content: start; }
+.visual-image img { width: 100%; aspect-ratio: 4 / 3; object-fit: contain; background: #080a0d; }
+.visual-alternatives { margin-top: .75rem; color: var(--muted); }
 .privacy-warning { padding: .65rem; border: 1px solid var(--accent); border-radius: .45rem; }
 .review-form { display: grid; gap: .75rem; padding-top: 1rem; border-top: 1px solid var(--line); }
 .review-form textarea { width: 100%; min-height: 6rem; resize: vertical; }
@@ -79,4 +89,5 @@ a { color: #83b9ff; }
   .workspace { grid-template-columns: 1fr; }
   aside { min-height: auto; }
   .queue { max-height: 20rem; }
+  .visual-images { grid-template-columns: 1fr; }
 }

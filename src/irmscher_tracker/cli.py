@@ -26,12 +26,22 @@ from irmscher_tracker.services.review_integrity import ReviewIntegrityService
 from irmscher_tracker.settings import Settings, get_settings
 from irmscher_tracker.sources.ebay_client import EbayEnvironment
 from irmscher_tracker.sources.sscom import load_feed_urls
+from irmscher_tracker.vision.alerts import VisionAlertService, VisualMatchNotFoundError
+from irmscher_tracker.vision.image_loader import VisionImageLoader
+from irmscher_tracker.vision.model import Dinov2Embedder
+from irmscher_tracker.vision.service import (
+    VisionDisabledError,
+    VisionRunBusyError,
+    VisionService,
+)
 
 app = typer.Typer(name="tracker", help="Irmscher Parts Tracker CLI")
 db_app = typer.Typer(help="Database commands")
 review_app = typer.Typer(help="Manual review commands")
+vision_app = typer.Typer(help="CPU visual-similarity commands")
 app.add_typer(db_app, name="db")
 app.add_typer(review_app, name="review")
+app.add_typer(vision_app, name="vision")
 console = Console()
 
 
@@ -270,6 +280,211 @@ def review_export(
     except DatasetExportError as exc:
         raise typer.BadParameter(str(exc)) from exc
     console.print(f"Dataset exported: {created}")
+
+
+def _vision_service(settings: Settings) -> tuple[VisionService, ReferenceImageStore]:
+    matcher = PartMatcher(settings.parts_config_path)
+    store = ReferenceImageStore(settings.data_directory)
+    session_factory = get_session_factory(settings.database_url)
+    integrity = ReviewIntegrityService(
+        session_factory,
+        settings.data_directory,
+        {part.id for part in matcher.parts},
+    )
+    return (
+        VisionService(
+            session_factory,
+            settings,
+            [part.id for part in matcher.parts],
+            store,
+            Dinov2Embedder.for_settings(settings),
+            integrity,
+        ),
+        store,
+    )
+
+
+async def _reserve_vision(service: VisionService, run_type: str) -> int:
+    try:
+        return await service.reserve(run_type)  # type: ignore[arg-type]
+    except VisionDisabledError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    except VisionRunBusyError as exc:
+        console.print(f"Vision run already active: {exc.run_id}")
+        raise typer.Exit(code=1) from exc
+
+
+@vision_app.command("warmup")
+def vision_warmup() -> None:
+    """Download/load DINOv2 and run one generated test image."""
+    settings = get_settings()
+    service, store = _vision_service(settings)
+
+    async def run() -> None:
+        try:
+            run_id = await _reserve_vision(service, "warmup")
+            await service.warmup(run_id)
+            row = await service.run(run_id)
+            if row is None or row.status != "completed":
+                raise typer.Exit(code=1)
+            embedder = service.embedder
+            console.print(f"Model ID: {embedder.model_id}")
+            console.print(f"Resolved revision: {embedder.resolved_revision}")
+            console.print(f"Embedding dimension: {embedder.embedding_dimension}")
+            console.print(f"Load time: {embedder.load_time_seconds:.3f}s")
+            console.print(f"Inference time: {embedder.last_inference_seconds:.3f}s")
+            console.print(f"Model cache: {settings.vision_model_cache_directory}")
+        finally:
+            service.embedder.release()
+            await store.close()
+
+    asyncio.run(run())
+
+
+@vision_app.command("rebuild-references")
+def vision_rebuild_references(
+    force: bool = typer.Option(False, "--force", help="Replace current-model embeddings"),
+) -> None:
+    """Embed all active approved reference images."""
+    settings = get_settings()
+    service, store = _vision_service(settings)
+
+    async def run() -> None:
+        try:
+            run_id = await _reserve_vision(service, "reference_rebuild")
+            await service.rebuild_references(run_id, force=force)
+            row = await service.run(run_id)
+            assert row is not None
+            console.print(
+                f"Reference run {row.id}: {row.status}; processed={row.processed_count}, "
+                f"skipped={row.skipped_count}, failed={row.failed_count}"
+            )
+            if row.status == "failed":
+                raise typer.Exit(code=1)
+        finally:
+            service.embedder.release()
+            await store.close()
+
+    asyncio.run(run())
+
+
+@vision_app.command("scan")
+def vision_scan(
+    limit: int | None = typer.Option(None, "--limit", min=1, max=500),
+    source: str | None = typer.Option(None, "--source"),
+    listing_id: int | None = typer.Option(None, "--listing-id", min=1),
+    force: bool = typer.Option(False, "--force"),
+) -> None:
+    """Analyze a bounded set of current marketplace listing images."""
+    if source not in {None, "ebay", "sscom"}:
+        raise typer.BadParameter("Source must be ebay or sscom")
+    settings = get_settings()
+    service, store = _vision_service(settings)
+
+    async def run() -> None:
+        try:
+            run_id = await _reserve_vision(service, "listing_scan")
+            await service.scan(
+                run_id,
+                limit=limit,
+                source=source,
+                listing_id=listing_id,
+                force=force,
+            )
+            row = await service.run(run_id)
+            assert row is not None
+            console.print(
+                f"Vision scan {row.id}: {row.status}; requested={row.requested_count}, "
+                f"processed={row.processed_count}, failed={row.failed_count}"
+            )
+            if row.status == "failed":
+                raise typer.Exit(code=1)
+        finally:
+            service.embedder.release()
+            await store.close()
+
+    asyncio.run(run())
+
+
+@vision_app.command("evaluate")
+def vision_evaluate() -> None:
+    """Evaluate persisted visual retrieval against latest manual reviews."""
+    settings = get_settings()
+    service, store = _vision_service(settings)
+
+    async def run() -> None:
+        try:
+            run_id = await _reserve_vision(service, "evaluation")
+            result = await service.evaluate(run_id)
+            if result is None:
+                raise typer.Exit(code=1)
+            report, json_path, csv_path = result
+            console.print(
+                f"Evaluated {report['total_evaluated_listings']} listings; "
+                f"top-1={report['top_1_accuracy']}, top-3={report['top_3_recall']}, "
+                f"MRR={report['mean_reciprocal_rank']}"
+            )
+            console.print(f"JSON: {json_path}")
+            console.print(f"CSV: {csv_path}")
+        finally:
+            service.embedder.release()
+            await store.close()
+
+    asyncio.run(run())
+
+
+@vision_app.command("status")
+def vision_status() -> None:
+    """Show vision enablement, cache, and active-run state."""
+    settings = get_settings()
+    service, store = _vision_service(settings)
+
+    async def run() -> None:
+        try:
+            console.print(await service.status())
+        finally:
+            await store.close()
+
+    asyncio.run(run())
+
+
+@vision_app.command("alert-preview")
+def vision_alert_preview(
+    match_id: int,
+    send: bool = typer.Option(False, "--send", help="Explicitly send this test preview"),
+) -> None:
+    """Print or explicitly send an experimental visual-candidate preview."""
+    settings = get_settings()
+    matcher = PartMatcher(settings.parts_config_path)
+    store = ReferenceImageStore(settings.data_directory)
+    alerts = VisionAlertService(
+        get_session_factory(settings.database_url),
+        VisionImageLoader(store),
+        {part.id: part.name for part in matcher.parts},
+    )
+
+    async def run() -> None:
+        notifier = None
+        try:
+            if send:
+                token = settings.telegram_bot_token.get_secret_value()
+                if not settings.telegram_enabled or not token or not settings.telegram_chat_id:
+                    raise typer.BadParameter("Telegram credentials are not configured")
+                from irmscher_tracker.notifications.telegram import TelegramNotifier
+
+                notifier = TelegramNotifier(token, settings.telegram_chat_id)
+                preview = await alerts.send(match_id, notifier)
+            else:
+                preview = await alerts.preview(match_id)
+            console.print(preview.text())
+        except VisualMatchNotFoundError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        finally:
+            if notifier is not None:
+                await notifier.close()
+            await store.close()
+
+    asyncio.run(run())
 
 
 @app.command("backup")

@@ -14,6 +14,7 @@ QueueMode = Literal[
     "confirmed-needs-positive-images",
     "part-needs-negatives",
     "uncertain-recheck",
+    "visual-candidates",
 ]
 DecisionReason = Literal[
     "exact-visible-part-number",
@@ -90,6 +91,8 @@ class HealthResponse(BaseModel):
     ebay_deletion_worker: Literal["disabled", "running", "stopped"]
     ebay_deletion_pending: int
     ebay_deletion_oldest_pending_seconds: float | None
+    vision: Literal["disabled", "model_not_cached", "ready", "run_active", "failed"]
+    vision_active_run_id: int | None
 
 
 class EbayDeletionMetadata(BaseModel):
@@ -230,6 +233,27 @@ class ReviewMatchResponse(BaseModel):
     algorithm_version: str
 
 
+class VisualEvidenceResponse(BaseModel):
+    match_id: int
+    listing_image_id: int
+    listing_image_url: str
+    part_id: str
+    part_name: str
+    model_fingerprint: str
+    model_id: str
+    model_revision: str
+    best_positive_reference_id: int | None
+    best_negative_reference_id: int | None
+    positive_similarity: float | None
+    negative_similarity: float | None
+    similarity_margin: float | None
+    positive_reference_count: int
+    negative_reference_count: int
+    rank_for_listing: int
+    status: Literal["ranked", "review_candidate", "positive_only", "insufficient_references"]
+    computed_at: datetime
+
+
 class ReviewQueueItemResponse(BaseModel):
     listing_id: int
     source: str
@@ -248,6 +272,7 @@ class ReviewQueueItemResponse(BaseModel):
     effective_part_id: str | None
     latest_review: ManualReviewResponse | None
     review_history_count: int
+    visual_evidence: list[VisualEvidenceResponse] = Field(default_factory=list)
     queue_mode: QueueMode = "all"
     queue_reason: str = "Matches the current filters."
 
@@ -481,3 +506,55 @@ class ReviewDatasetReadinessResponse(BaseModel):
     parts_without_negative_examples: list[str]
     integrity_status: Literal["ok", "warning", "error"]
     parts: list[ReviewReadinessPart]
+
+
+class VisionStatusResponse(BaseModel):
+    state: Literal["disabled", "model_not_cached", "ready", "run_active", "failed"]
+    enabled: bool
+    model_cached: bool
+    model_loaded: bool
+    model_id: str
+    model_revision: str | None
+    model_fingerprint: str | None
+    active_run_id: int | None
+    automatic_analysis_enabled: bool
+    automatic_alerts_enabled: bool
+
+
+class VisionRunResponse(BaseModel):
+    id: int
+    run_type: Literal["warmup", "reference_rebuild", "listing_scan", "evaluation"]
+    status: Literal["running", "completed", "partial", "failed", "interrupted"]
+    model_fingerprint: str | None
+    requested_count: int
+    processed_count: int
+    skipped_count: int
+    failed_count: int
+    errors: list[str]
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class VisionRunAcceptedResponse(BaseModel):
+    vision_run_id: int
+    status: Literal["running"] = "running"
+
+
+class VisionReferenceRebuildRequest(BaseModel):
+    force: bool = False
+
+
+class VisionAnalyzeRequest(BaseModel):
+    limit: int | None = Field(default=None, ge=1, le=500)
+    source: Literal["ebay", "sscom"] | None = None
+    force: bool = False
+
+
+class VisionListingResponse(BaseModel):
+    listing_id: int
+    matches: list[VisualEvidenceResponse]
+
+
+class VisionAlertPreviewResponse(BaseModel):
+    match_id: int
+    preview: str

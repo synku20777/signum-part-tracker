@@ -86,6 +86,21 @@ case "$command" in
     doctor)
         docker compose exec "$SERVICE" tracker doctor
         ;;
+    vision-warmup)
+        docker compose exec "$SERVICE" tracker vision warmup
+        ;;
+    vision-rebuild)
+        docker compose exec "$SERVICE" tracker vision rebuild-references
+        ;;
+    vision-scan)
+        docker compose exec "$SERVICE" tracker vision scan
+        ;;
+    vision-evaluate)
+        docker compose exec "$SERVICE" tracker vision evaluate
+        ;;
+    vision-status)
+        docker compose exec "$SERVICE" tracker vision status
+        ;;
     backup)
         filename="${2:-backup_$(date +%Y%m%d_%H%M%S).tar.gz}"
         require_backup_name "$filename"
@@ -118,7 +133,7 @@ case "$command" in
         wait_for_health
         ;;
     *)
-        echo "Usage: $0 {init|start|stop|restart|status|logs|scan-source|backup|restore|doctor|update}" >&2
+        echo "Usage: $0 {init|start|stop|restart|status|logs|scan-source|backup|restore|doctor|update|vision-warmup|vision-rebuild|vision-scan|vision-evaluate|vision-status}" >&2
         exit 2
         ;;
 esac

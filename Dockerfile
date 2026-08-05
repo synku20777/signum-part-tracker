@@ -1,7 +1,8 @@
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:$PATH"
+    PATH="/app/.venv/bin:$PATH" \
+    HF_HOME="/app/data/models/huggingface"
 
 WORKDIR /app
 
@@ -15,7 +16,7 @@ COPY alembic/ alembic/
 COPY alembic.ini docker-entrypoint.sh ./
 COPY config/ config/
 RUN useradd --create-home tracker \
-    && mkdir -p /app/data /app/config \
+    && mkdir -p /app/data/models/huggingface /app/data/vision /app/config \
     && chown -R tracker:tracker /app \
     && chmod +x /app/docker-entrypoint.sh
 

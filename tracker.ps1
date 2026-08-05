@@ -1,6 +1,6 @@
 param (
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet("init", "start", "stop", "restart", "status", "logs", "scan-source", "backup", "restore", "doctor", "update")]
+    [ValidateSet("init", "start", "stop", "restart", "status", "logs", "scan-source", "backup", "restore", "doctor", "update", "vision-warmup", "vision-rebuild", "vision-scan", "vision-evaluate", "vision-status")]
     [string]$Command,
     [Parameter(Position = 1)]
     [string]$Value
@@ -75,6 +75,11 @@ switch ($Command) {
         docker compose exec $Service tracker trigger-scan $source --wait
     }
     "doctor" { docker compose exec $Service tracker doctor }
+    "vision-warmup" { docker compose exec $Service tracker vision warmup }
+    "vision-rebuild" { docker compose exec $Service tracker vision rebuild-references }
+    "vision-scan" { docker compose exec $Service tracker vision scan }
+    "vision-evaluate" { docker compose exec $Service tracker vision evaluate }
+    "vision-status" { docker compose exec $Service tracker vision status }
     "backup" {
         $filename = if ($Value) { $Value } else { "backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').tar.gz" }
         Assert-BackupName $filename

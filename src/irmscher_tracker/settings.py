@@ -4,6 +4,7 @@ import re
 from decimal import Decimal
 from ipaddress import ip_address
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -60,12 +61,37 @@ class Settings(BaseSettings):
     review_negative_listings_target: int = Field(default=5, ge=0)
     review_negative_references_target: int = Field(default=10, ge=0)
 
+    vision_enabled: bool = False
+    vision_model_id: str = "facebook/dinov2-small"
+    vision_model_revision: str = ""
+    vision_device: Literal["cpu"] = "cpu"
+    vision_batch_size: int = Field(default=4, ge=1, le=32)
+    vision_max_listings_per_run: int = Field(default=20, ge=1, le=500)
+    vision_max_images_per_listing: int = Field(default=8, ge=1, le=32)
+    vision_auto_analyze: bool = False
+    vision_alerts_enabled: bool = False
+    vision_review_min_positive: float | None = Field(default=None, ge=-1, le=1)
+    vision_review_min_margin: float | None = Field(default=None, ge=-2, le=2)
+    vision_alert_min_positive: float | None = Field(default=None, ge=-1, le=1)
+    vision_alert_min_margin: float | None = Field(default=None, ge=-2, le=2)
+
     @field_validator("api_token")
     @classmethod
     def validate_api_token(cls, value: SecretStr) -> SecretStr:
         if len(value.get_secret_value().encode()) < 32:
             raise ValueError("TRACKER_API_TOKEN must contain at least 32 bytes")
         return value
+
+    @field_validator(
+        "vision_review_min_positive",
+        "vision_review_min_margin",
+        "vision_alert_min_positive",
+        "vision_alert_min_margin",
+        mode="before",
+    )
+    @classmethod
+    def empty_vision_threshold_is_none(cls, value: object) -> object:
+        return None if value == "" else value
 
     @model_validator(mode="after")
     def validate_ebay_deletion_callback(self) -> Settings:
@@ -106,6 +132,17 @@ class Settings(BaseSettings):
             raise ValueError("Sandbox eBay deletion endpoint must use HTTP or HTTPS")
         return self
 
+    @model_validator(mode="after")
+    def validate_vision_alerts(self) -> Settings:
+        if self.vision_alerts_enabled and (
+            self.vision_alert_min_positive is None or self.vision_alert_min_margin is None
+        ):
+            raise ValueError(
+                "Vision alerts require TRACKER_VISION_ALERT_MIN_POSITIVE and "
+                "TRACKER_VISION_ALERT_MIN_MARGIN"
+            )
+        return self
+
     @property
     def ebay_deletion_callback_configured(self) -> bool:
         return bool(
@@ -135,6 +172,14 @@ class Settings(BaseSettings):
         if not self.database_url.startswith(prefix) or self.database_url.endswith(":memory:"):
             return Path("data").resolve()
         return Path(self.database_url.removeprefix(prefix)).resolve().parent
+
+    @property
+    def vision_directory(self) -> Path:
+        return self.data_directory / "vision"
+
+    @property
+    def vision_model_cache_directory(self) -> Path:
+        return self.data_directory / "models" / "huggingface"
 
 
 def get_settings() -> Settings:

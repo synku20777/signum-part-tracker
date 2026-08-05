@@ -3,6 +3,7 @@ import time
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -31,6 +32,27 @@ class ApiFakeAdapter(SourceAdapter):
         return None
 
 
+class ApiBlockingEmbedder:
+    model_id = "fake/dinov2"
+    resolved_revision = "fake-commit"
+    model_fingerprint = "f" * 64
+    preprocessing_version = "fake-v1"
+    embedding_dimension = 3
+    load_time_seconds = 0.0
+    last_inference_seconds = 0.0
+
+    async def warmup(self):
+        await asyncio.sleep(60)
+        return np.array([1, 0, 0], dtype=np.float32)
+
+    async def embed(self, images):
+        del images
+        return np.empty((0, 3), dtype=np.float32)
+
+    def release(self):
+        return None
+
+
 @pytest.fixture
 def test_client(settings, session_factory):
     app = create_app(settings, session_factory)
@@ -54,6 +76,8 @@ def test_health_endpoint(test_client):
         "ebay_deletion_worker": "disabled",
         "ebay_deletion_pending": 0,
         "ebay_deletion_oldest_pending_seconds": None,
+        "vision": "disabled",
+        "vision_active_run_id": None,
     }
 
 
@@ -83,7 +107,11 @@ def test_review_shell_is_public_but_review_data_is_protected(test_client, settin
     assert page.headers["Content-Security-Policy"].startswith("default-src 'none'")
     assert page.headers["Referrer-Policy"] == "no-referrer"
     assert page.headers["X-Frame-Options"] == "DENY"
-    assert test_client.get("/review/assets/review.js").status_code == 200
+    assert 'value="visual-candidates"' in page.text
+    script = test_client.get("/review/assets/review.js")
+    assert script.status_code == 200
+    assert "Analyze this listing" in script.text
+    assert "Visual evidence is experimental" in script.text
 
     for path in (
         "/review/parts",
@@ -92,6 +120,9 @@ def test_review_shell_is_public_but_review_data_is_protected(test_client, settin
         "/review/references",
         "/review/integrity",
         "/review/dataset-readiness",
+        "/vision/status",
+        "/vision/runs",
+        "/vision/matches",
     ):
         response = test_client.get(path)
         assert response.status_code == 401
@@ -108,6 +139,12 @@ def test_review_shell_is_public_but_review_data_is_protected(test_client, settin
     readiness = test_client.get("/review/dataset-readiness", headers=headers)
     assert readiness.status_code == 200
     assert len(readiness.json()["parts"]) == 9
+    vision = test_client.get("/vision/status", headers=headers)
+    assert vision.status_code == 200
+    assert vision.json()["state"] == "disabled"
+    disabled = test_client.post("/vision/warmup", headers=headers)
+    assert disabled.status_code == 409
+    assert disabled.json()["detail"] == "Vision is disabled"
 
 
 def test_list_listings_empty(test_client):
@@ -242,6 +279,28 @@ def test_unimplemented_registered_source_is_rejected(test_client, settings):
     headers = {"Authorization": f"Bearer {settings.api_token.get_secret_value()}"}
     response = test_client.post("/runs/allegro", headers=headers)
     assert response.status_code == 400
+
+
+def test_vision_background_run_is_protected_and_locked(settings, session_factory, monkeypatch):
+    settings.vision_enabled = True
+    fake = ApiBlockingEmbedder()
+    monkeypatch.setattr(
+        app_module.Dinov2Embedder,
+        "for_settings",
+        classmethod(lambda cls, configured: fake),
+    )
+    headers = {"Authorization": f"Bearer {settings.api_token.get_secret_value()}"}
+    with TestClient(create_app(settings, session_factory)) as client:
+        assert client.post("/vision/warmup").status_code == 401
+        first = client.post("/vision/warmup", headers=headers)
+        assert first.status_code == 202
+        run_id = first.json()["vision_run_id"]
+        second = client.post("/vision/references/rebuild", headers=headers)
+        assert second.status_code == 409
+        assert second.json()["detail"]["vision_run_id"] == run_id
+        run = client.get(f"/vision/runs/{run_id}", headers=headers)
+        assert run.status_code == 200
+        assert run.json()["status"] == "running"
 
 
 @pytest.mark.asyncio

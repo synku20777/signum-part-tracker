@@ -71,6 +71,19 @@ All environment variables use the `TRACKER_` prefix.
 | `TRACKER_REVIEW_POSITIVE_REFERENCES_TARGET` | `5` | Active positive images wanted per part |
 | `TRACKER_REVIEW_NEGATIVE_LISTINGS_TARGET` | `5` | Distinct negative listings wanted per part |
 | `TRACKER_REVIEW_NEGATIVE_REFERENCES_TARGET` | `10` | Active negative images wanted per part |
+| `TRACKER_VISION_ENABLED` | `false` | Enable explicit CPU visual-similarity commands |
+| `TRACKER_VISION_MODEL_ID` | `facebook/dinov2-small` | Hugging Face retrieval model |
+| `TRACKER_VISION_MODEL_REVISION` | empty | Optional pinned model revision; resolved revision is stored |
+| `TRACKER_VISION_DEVICE` | `cpu` | Vision device; this MVP accepts only `cpu` |
+| `TRACKER_VISION_BATCH_SIZE` | `4` | Maximum images per inference batch |
+| `TRACKER_VISION_MAX_LISTINGS_PER_RUN` | `20` | Default explicit scan limit |
+| `TRACKER_VISION_MAX_IMAGES_PER_LISTING` | `8` | Per-listing image limit |
+| `TRACKER_VISION_AUTO_ANALYZE` | `false` | Reserved guardrail; automatic analysis is not connected |
+| `TRACKER_VISION_ALERTS_ENABLED` | `false` | Reserved guardrail; automatic alerts are not connected |
+| `TRACKER_VISION_REVIEW_MIN_POSITIVE` | empty | Optional review-candidate positive-similarity threshold |
+| `TRACKER_VISION_REVIEW_MIN_MARGIN` | empty | Optional review-candidate similarity-margin threshold |
+| `TRACKER_VISION_ALERT_MIN_POSITIVE` | empty | Required before future automatic visual alerts can be enabled |
+| `TRACKER_VISION_ALERT_MIN_MARGIN` | empty | Required before future automatic visual alerts can be enabled |
 
 The SS.com feed list is in `config/sources.yaml`, mounted read-only in the
 container. The defaults cover Signum and Vectra parts and donor cars. Feed URLs
@@ -96,6 +109,11 @@ backup [filename]
 restore <filename>
 doctor
 update
+vision-warmup
+vision-rebuild
+vision-scan
+vision-evaluate
+vision-status
 ```
 
 Examples:
@@ -118,9 +136,11 @@ tracker review export /app/data/exports/pilot-dataset
 ```
 
 The default backup is one `.tar.gz` containing a consistent SQLite copy, the
-sanitized `references/` gallery, and a hash-verified manifest. An explicitly
+sanitized `references/` gallery, vision evaluation JSON/CSV reports, and a
+hash-verified manifest. The reproducible Hugging Face model cache is excluded.
+An explicitly
 named `.sqlite` file remains supported for database-only legacy backups; it is
-incomplete once reference images exist. Restore accepts either format directly
+incomplete once reference images or evaluation reports exist. Restore accepts either format directly
 under `data/`, creates a full pre-restore archive, stops the service, validates
 and restores in a one-shot container, and recovers the pre-restore archive if
 the requested restore fails. A legacy SQLite restore preserves current
@@ -128,7 +148,7 @@ reference files.
 
 ## API
 
-- `GET /health` reports database, scheduler, eBay, SS.com, and Telegram state.
+- `GET /health` reports database, scheduler, marketplace, Telegram, and vision state.
 - `GET /listings` and `GET /listings/{id}` expose stored listings.
 - `GET /matches` exposes current part-specific matches.
 - `GET /search-runs` lists scan history.
@@ -143,6 +163,9 @@ reference files.
   `/review/integrity`, `/review/queue`, `/review/listings/*`, and
   `/review/references/*` require the same bearer token. The `/review` HTML shell
   is public but contains no data or token.
+- `/vision/status`, `/vision/runs`, `/vision/matches`, and all vision mutation
+  routes require the bearer token. Explicit work returns HTTP 202 and is polled
+  through `/vision/runs/{id}`; a concurrent vision run returns HTTP 409.
 
 Manual and scheduled scans share one lock per source. An overlap returns HTTP
 409 with the active run ID. Feed discovery completeness controls misses;
@@ -213,6 +236,54 @@ provenance under the selected retention policy.
 Keep this page private. If a tunnel or reverse proxy is used for eBay
 compliance, expose only `/ebay/marketplace-account-deletion`; never expose
 `/review` or its API routes.
+
+## Experimental visual similarity
+
+The optional vision MVP is CPU-only image retrieval using
+`facebook/dinov2-small`. It compares DINOv2 embeddings from marketplace images
+with active, manually approved positive and part-specific negative references.
+It is not a trained classifier. Similarity and margin values are neither
+probabilities nor confidence percentages.
+
+Keep automatic behavior off during evaluation:
+
+```dotenv
+TRACKER_VISION_ENABLED=true
+TRACKER_VISION_AUTO_ANALYZE=false
+TRACKER_VISION_ALERTS_ENABLED=false
+```
+
+Then run explicit, bounded operations:
+
+```bash
+tracker vision warmup
+tracker vision rebuild-references
+tracker vision scan --limit 20
+tracker vision scan --source ebay
+tracker vision scan --source sscom
+tracker vision evaluate
+tracker vision status
+tracker vision alert-preview MATCH_ID
+```
+
+Use `tracker vision rebuild-references --force` or `tracker vision scan --force`
+only to replace embeddings for the current model fingerprint. Embeddings for
+other fingerprints remain available. The review page has a **Visual
+candidates** queue and an **Analyze this listing** action. Its evidence remains
+separate from deterministic text matches and append-only human reviews; it
+never changes either one.
+
+The first warmup downloads the model only on explicit request. DINOv2-small
+weights are roughly 85 MB, while PyTorch and Transformers make the container
+image and installed environment substantially larger. CPU warmup and inference
+can take seconds depending on the host. The persistent cache is under
+`data/models/huggingface`; evaluation reports are under
+`data/vision/evaluations`.
+
+`tracker vision alert-preview MATCH_ID` prints an experimental preview.
+`--send` explicitly sends an in-memory three-panel test image through Telegram
+without reserving a production notification. No marketplace scan automatically
+loads the model, analyzes images, or sends a visual alert.
 
 ## eBay Production compliance
 
@@ -298,7 +369,7 @@ docker compose config
   only to remove stale temporary files; database rows and WebP references are
   never automatically deleted.
 
-Kleinanzeigen, Allegro, Ovoko, image embeddings, automatic visual recognition,
-OCR, CAPTCHA
+Kleinanzeigen, Allegro, Ovoko, trained image classification, model fine-tuning,
+OCR, object detection, CAPTCHA
 handling, proxies, authentication automation, purchasing, and seller contact
 are out of scope.

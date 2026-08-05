@@ -37,9 +37,17 @@ from irmscher_tracker.api.schemas import (
     ReviewQueueResponse,
     RunAcceptedResponse,
     SearchRunResponse,
+    VisionAlertPreviewResponse,
+    VisionAnalyzeRequest,
+    VisionListingResponse,
+    VisionReferenceRebuildRequest,
+    VisionRunAcceptedResponse,
+    VisionRunResponse,
+    VisionStatusResponse,
+    VisualEvidenceResponse,
 )
 from irmscher_tracker.db.engine import get_session_factory
-from irmscher_tracker.db.models import ListingRow, PartMatchRow, SearchRunRow
+from irmscher_tracker.db.models import ListingRow, PartMatchRow, SearchRunRow, VisionRunRow
 from irmscher_tracker.db.repositories import (
     EbayDeletionRepository,
     ListingRepository,
@@ -78,6 +86,13 @@ from irmscher_tracker.sources.ebay_client import (
     EbayEnvironment,
 )
 from irmscher_tracker.sources.sscom import SscomAdapter, load_feed_urls
+from irmscher_tracker.vision.alerts import VisionAlertService, VisualMatchNotFoundError
+from irmscher_tracker.vision.model import Dinov2Embedder
+from irmscher_tracker.vision.service import (
+    VisionDisabledError,
+    VisionRunBusyError,
+    VisionService,
+)
 
 logger = logging.getLogger(__name__)
 security = HTTPBearer()
@@ -98,6 +113,9 @@ class RuntimeState:
     reference_store: ReferenceImageStore | None = None
     review_service: ReviewService | None = None
     review_integrity_service: ReviewIntegrityService | None = None
+    vision_service: VisionService | None = None
+    vision_alert_service: VisionAlertService | None = None
+    vision_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
 
 
 def _search_service(runtime: RuntimeState, notifier: TelegramNotifier | None) -> SearchService:
@@ -288,6 +306,20 @@ def create_app(
             settings.data_directory,
             {part.id for part in runtime.matcher.parts},
         )
+        embedder = Dinov2Embedder.for_settings(settings)
+        runtime.vision_service = VisionService(
+            session_factory,
+            settings,
+            [part.id for part in runtime.matcher.parts],
+            runtime.reference_store,
+            embedder,
+            runtime.review_integrity_service,
+        )
+        runtime.vision_alert_service = VisionAlertService(
+            session_factory,
+            runtime.vision_service.loader,
+            {part.id: part.name for part in runtime.matcher.parts},
+        )
         if settings.ebay_client_id and settings.ebay_client_secret.get_secret_value():
             runtime.ebay_token_provider = EbayApplicationTokenProvider(
                 settings.ebay_client_id,
@@ -307,6 +339,7 @@ def create_app(
         async with session_factory() as session:
             await SearchRunRepository().interrupt_stale(session)
             await session.commit()
+        await runtime.vision_service.recover_stale_runs()
 
         intervals = {
             Source.EBAY: settings.search_interval_minutes,
@@ -320,7 +353,11 @@ def create_app(
         try:
             yield
         finally:
-            tasks = [*runtime.scheduler_tasks.values(), *runtime.manual_tasks.values()]
+            tasks = [
+                *runtime.scheduler_tasks.values(),
+                *runtime.manual_tasks.values(),
+                *runtime.vision_tasks.values(),
+            ]
             if runtime.ebay_deletion_task is not None:
                 tasks.append(runtime.ebay_deletion_task)
             for task in tasks:
@@ -334,6 +371,7 @@ def create_app(
                 await runtime.ebay_token_provider.close()
             if runtime.reference_store is not None:
                 await runtime.reference_store.close()
+            embedder.release()
 
     app = FastAPI(
         title="Irmscher Parts Tracker",
@@ -384,6 +422,34 @@ def create_app(
         if service is None:
             raise HTTPException(status_code=503, detail="Review integrity service is unavailable")
         return service
+
+    def vision(request: Request) -> VisionService:
+        service = runtime(request).vision_service
+        if service is None:
+            raise HTTPException(status_code=503, detail="Vision service is unavailable")
+        return service
+
+    def vision_alerts(request: Request) -> VisionAlertService:
+        service = runtime(request).vision_alert_service
+        if service is None:
+            raise HTTPException(status_code=503, detail="Vision alert preview is unavailable")
+        return service
+
+    def start_vision_task(request: Request, run_id: int, operation: Awaitable[None]) -> None:
+        current = runtime(request)
+
+        async def execute() -> None:
+            await operation
+
+        task: asyncio.Task[None] = asyncio.create_task(execute())
+        current.vision_tasks[run_id] = task
+
+        def finished(completed: asyncio.Task[None]) -> None:
+            current.vision_tasks.pop(run_id, None)
+            if not completed.cancelled() and completed.exception() is not None:
+                logger.error("Vision run %d terminated unexpectedly", run_id)
+
+        task.add_done_callback(finished)
 
     @app.exception_handler(SourceBusyError)
     async def source_busy_handler(request: Request, exc: SourceBusyError) -> JSONResponse:
@@ -450,6 +516,10 @@ def create_app(
         if status == "degraded":
             response.status_code = 503
         settings = current.settings
+        try:
+            vision_status = await vision(request).status()
+        except Exception:
+            vision_status = {"state": "failed", "active_run_id": None}
         return HealthResponse(
             status=status,
             version=__version__,
@@ -467,6 +537,11 @@ def create_app(
             ebay_deletion_worker=deletion_worker,
             ebay_deletion_pending=deletion_pending,
             ebay_deletion_oldest_pending_seconds=deletion_oldest,
+            vision=cast(
+                Literal["disabled", "model_not_cached", "ready", "run_active", "failed"],
+                vision_status["state"],
+            ),
+            vision_active_run_id=cast(int | None, vision_status["active_run_id"]),
         )
 
     @app.get("/ebay/marketplace-account-deletion")
@@ -670,6 +745,171 @@ def create_app(
         )
 
     @app.get(
+        "/vision/status",
+        response_model=VisionStatusResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def vision_status(request: Request) -> VisionStatusResponse:
+        return VisionStatusResponse.model_validate(await vision(request).status())
+
+    @app.get(
+        "/vision/runs",
+        response_model=list[VisionRunResponse],
+        dependencies=[Depends(verify_token)],
+    )
+    async def vision_runs(
+        request: Request, limit: int = Query(default=50, ge=1, le=100)
+    ) -> list[VisionRunResponse]:
+        return [_vision_run_to_response(row) for row in await vision(request).runs(limit)]
+
+    @app.get(
+        "/vision/runs/{run_id}",
+        response_model=VisionRunResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def vision_run(request: Request, run_id: int) -> VisionRunResponse:
+        row = await vision(request).run(run_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Vision run not found")
+        return _vision_run_to_response(row)
+
+    async def reserve_vision_run(
+        service: VisionService,
+        run_type: Literal["warmup", "reference_rebuild", "listing_scan", "evaluation"],
+    ) -> int:
+        try:
+            return await service.reserve(run_type)
+        except VisionDisabledError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from None
+        except VisionRunBusyError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"message": "Vision run already active.", "vision_run_id": exc.run_id},
+            ) from None
+
+    @app.post(
+        "/vision/warmup",
+        status_code=202,
+        response_model=VisionRunAcceptedResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def vision_warmup(request: Request) -> VisionRunAcceptedResponse:
+        service = vision(request)
+        run_id = await reserve_vision_run(service, "warmup")
+        start_vision_task(request, run_id, service.warmup(run_id))
+        return VisionRunAcceptedResponse(vision_run_id=run_id)
+
+    @app.post(
+        "/vision/references/rebuild",
+        status_code=202,
+        response_model=VisionRunAcceptedResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def vision_rebuild_references(
+        request: Request,
+        payload: VisionReferenceRebuildRequest | None = None,
+    ) -> VisionRunAcceptedResponse:
+        payload = payload or VisionReferenceRebuildRequest()
+        service = vision(request)
+        run_id = await reserve_vision_run(service, "reference_rebuild")
+        start_vision_task(request, run_id, service.rebuild_references(run_id, force=payload.force))
+        return VisionRunAcceptedResponse(vision_run_id=run_id)
+
+    @app.post(
+        "/vision/analyze",
+        status_code=202,
+        response_model=VisionRunAcceptedResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def vision_analyze(
+        request: Request, payload: VisionAnalyzeRequest | None = None
+    ) -> VisionRunAcceptedResponse:
+        payload = payload or VisionAnalyzeRequest()
+        service = vision(request)
+        run_id = await reserve_vision_run(service, "listing_scan")
+        start_vision_task(
+            request,
+            run_id,
+            service.scan(
+                run_id,
+                limit=payload.limit,
+                source=payload.source,
+                force=payload.force,
+            ),
+        )
+        return VisionRunAcceptedResponse(vision_run_id=run_id)
+
+    @app.post(
+        "/vision/listings/{listing_id}/analyze",
+        status_code=202,
+        response_model=VisionRunAcceptedResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def vision_analyze_listing(
+        request: Request,
+        listing_id: int,
+        payload: VisionAnalyzeRequest | None = None,
+    ) -> VisionRunAcceptedResponse:
+        payload = payload or VisionAnalyzeRequest()
+        service = vision(request)
+        run_id = await reserve_vision_run(service, "listing_scan")
+        start_vision_task(
+            request,
+            run_id,
+            service.scan(run_id, listing_id=listing_id, force=payload.force),
+        )
+        return VisionRunAcceptedResponse(vision_run_id=run_id)
+
+    @app.get(
+        "/vision/matches",
+        response_model=list[VisualEvidenceResponse],
+        dependencies=[Depends(verify_token)],
+    )
+    async def vision_matches(
+        request: Request,
+        part_id: str | None = None,
+        status: Literal["ranked", "review_candidate", "positive_only", "insufficient_references"]
+        | None = None,
+        model_fingerprint: str | None = None,
+        limit: int = Query(default=100, ge=1, le=500),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[VisualEvidenceResponse]:
+        return await reviews(request).visual_matches(
+            part_id=part_id,
+            status=status,
+            model_fingerprint=model_fingerprint,
+            limit=limit,
+            offset=offset,
+        )
+
+    @app.get(
+        "/vision/listings/{listing_id}",
+        response_model=VisionListingResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def vision_listing(request: Request, listing_id: int) -> VisionListingResponse:
+        try:
+            await reviews(request).detail(listing_id)
+        except ReviewNotFoundError:
+            raise HTTPException(status_code=404, detail="Listing not found") from None
+        return VisionListingResponse(
+            listing_id=listing_id,
+            matches=await reviews(request).visual_matches(listing_id=listing_id),
+        )
+
+    @app.post(
+        "/vision/matches/{match_id}/alert-preview",
+        response_model=VisionAlertPreviewResponse,
+        dependencies=[Depends(verify_token)],
+    )
+    async def vision_alert_preview(request: Request, match_id: int) -> VisionAlertPreviewResponse:
+        try:
+            preview = await vision_alerts(request).preview(match_id)
+        except VisualMatchNotFoundError:
+            raise HTTPException(status_code=404, detail="Visual match not found") from None
+        return VisionAlertPreviewResponse(match_id=match_id, preview=preview.text())
+
+    @app.get(
         "/review/parts",
         response_model=list[ReviewPartResponse],
         dependencies=[Depends(verify_token)],
@@ -720,6 +960,7 @@ def create_app(
             "confirmed-needs-positive-images",
             "part-needs-negatives",
             "uncertain-recheck",
+            "visual-candidates",
         ] = "all",
         status: Literal["all", "unreviewed", "reviewed", "confirmed", "rejected", "uncertain"]
         | None = None,
@@ -730,6 +971,14 @@ def create_app(
         max_score: int | None = None,
         has_images: Literal["true", "false", "all"] = "true",
         match_state: Literal["all", "matched", "unmatched"] = "all",
+        visual_part_id: str | None = None,
+        min_positive_similarity: float | None = Query(default=None, ge=-1, le=1),
+        min_similarity_margin: float | None = Query(default=None, ge=-2, le=2),
+        evidence_status: Literal[
+            "ranked", "review_candidate", "positive_only", "insufficient_references"
+        ]
+        | None = None,
+        model_fingerprint: str | None = None,
         limit: int = Query(default=50, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
     ) -> ReviewQueueResponse:
@@ -743,6 +992,11 @@ def create_app(
             max_score=max_score,
             has_images=None if has_images == "all" else has_images == "true",
             match_state=match_state,
+            visual_part_id=visual_part_id,
+            min_positive_similarity=min_positive_similarity,
+            min_similarity_margin=min_similarity_margin,
+            evidence_status=evidence_status,
+            model_fingerprint=model_fingerprint,
             limit=limit,
             offset=offset,
         )
@@ -874,4 +1128,26 @@ def _run_to_response(row: SearchRunRow) -> SearchRunResponse:
         matches_found=row.matches_found,
         alerts_sent=row.alerts_sent,
         status=row.status,
+    )
+
+
+def _vision_run_to_response(row: VisionRunRow) -> VisionRunResponse:
+    try:
+        errors = json.loads(row.errors_json or "[]")
+    except json.JSONDecodeError:
+        errors = []
+    if not isinstance(errors, list) or not all(isinstance(value, str) for value in errors):
+        errors = []
+    return VisionRunResponse(
+        id=row.id,
+        run_type=row.run_type,  # type: ignore[arg-type]
+        status=row.status,  # type: ignore[arg-type]
+        model_fingerprint=row.model_fingerprint,
+        requested_count=row.requested_count,
+        processed_count=row.processed_count,
+        skipped_count=row.skipped_count,
+        failed_count=row.failed_count,
+        errors=errors,
+        started_at=row.started_at,
+        finished_at=row.finished_at,
     )

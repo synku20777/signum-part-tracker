@@ -18,12 +18,14 @@ from irmscher_tracker.api.schemas import (
     ReviewIntegritySummary,
 )
 from irmscher_tracker.db.models import (
+    ImageEmbeddingRow,
     ListingImageRow,
     ListingRow,
     ManualReviewRow,
     ReferenceImageRow,
 )
 from irmscher_tracker.db.repositories import normalized_image_urls
+from irmscher_tracker.vision.embeddings import EmbeddingIntegrityError, deserialize_vector
 
 logger = logging.getLogger(__name__)
 _MAX_IDS = 100
@@ -46,6 +48,7 @@ class ReviewIntegrityService:
             images = list((await session.execute(select(ListingImageRow))).scalars())
             reviews = list((await session.execute(select(ManualReviewRow))).scalars())
             references = list((await session.execute(select(ReferenceImageRow))).scalars())
+            embeddings = list((await session.execute(select(ImageEmbeddingRow))).scalars())
 
         listing_by_id = {row.id: row for row in listings}
         image_by_id = {row.id: row for row in images}
@@ -59,6 +62,19 @@ class ReviewIntegrityService:
         }
 
         checks: list[ReviewIntegrityCheckResponse] = []
+        invalid_embeddings: list[int] = []
+        for row in embeddings:
+            try:
+                deserialize_vector(row.vector_blob, row.embedding_dim, row.dtype)
+            except EmbeddingIntegrityError:
+                invalid_embeddings.append(row.id)
+        self._add(
+            checks,
+            "vision_embedding_vectors",
+            "error",
+            invalid_embeddings,
+            "Vision embeddings are not valid normalized float32 vectors.",
+        )
         self._add(
             checks,
             "listing_image_parent",

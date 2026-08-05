@@ -38,6 +38,7 @@
             <option value="confirmed-needs-positive-images">Confirmed needing positives</option>
             <option value="part-needs-negatives">Parts needing negatives</option>
             <option value="uncertain-recheck">Uncertain recheck</option>
+            <option value="visual-candidates">Visual candidates</option>
             <option value="all">All</option>
           </select>
         </label>
@@ -68,6 +69,19 @@
         </label>
         <label>Part <select name="part_id" class="part-options"><option value="">All</option></select></label>
         <label>Minimum score <input name="min_score" type="number" inputmode="numeric"></label>
+        <label>Visual part <select name="visual_part_id" class="part-options"><option value="">All</option></select></label>
+        <label>Minimum positive similarity <input name="min_positive_similarity" type="number" min="-1" max="1" step="0.001"></label>
+        <label>Minimum margin <input name="min_similarity_margin" type="number" min="-2" max="2" step="0.001"></label>
+        <label>Visual status
+          <select name="evidence_status">
+            <option value="">All</option>
+            <option value="review_candidate">Review candidate</option>
+            <option value="ranked">Ranked</option>
+            <option value="positive_only">Positive only</option>
+            <option value="insufficient_references">Insufficient references</option>
+          </select>
+        </label>
+        <label>Model fingerprint <input name="model_fingerprint" type="text" autocomplete="off"></label>
         <label>Listing state
           <select name="is_active"><option value="true">Active</option><option value="false">Inactive</option><option value="all">All</option></select>
         </label>

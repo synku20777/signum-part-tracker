@@ -52,6 +52,17 @@ class TelegramNotifier:
             logger.exception("Test message failed")
             return False
 
+    async def send_photo(self, content: bytes, caption: str) -> None:
+        """Send an explicit in-memory image preview."""
+        url = f"{TELEGRAM_API_BASE}/bot{self._bot_token}/sendPhoto"
+        response = await self._client.post(
+            url,
+            data={"chat_id": self._chat_id, "caption": caption},
+            files={"photo": ("visual-preview.webp", content, "image/webp")},
+        )
+        response.raise_for_status()
+        logger.info("Telegram visual preview sent successfully")
+
     def _format_message(self, payload: AlertPayload) -> str:
         alert_emoji = {
             AlertType.NEW_LISTING: "\U0001f7e2",

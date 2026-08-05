@@ -242,3 +242,124 @@ class ReferenceImageRow(Base):
             sqlite_where=sa.text("is_active = 1"),
         ),
     )
+
+
+class VisionRunRow(Base):
+    __tablename__ = "vision_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    run_type: Mapped[str] = mapped_column(sa.String(32), index=True)
+    status: Mapped[str] = mapped_column(sa.String(16), index=True)
+    model_fingerprint: Mapped[str | None] = mapped_column(sa.String(64), index=True)
+    requested_count: Mapped[int] = mapped_column(sa.Integer, default=0)
+    processed_count: Mapped[int] = mapped_column(sa.Integer, default=0)
+    skipped_count: Mapped[int] = mapped_column(sa.Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(sa.Integer, default=0)
+    errors_json: Mapped[str] = mapped_column(sa.Text, default="[]")
+    started_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "run_type IN ('warmup', 'reference_rebuild', 'listing_scan', 'evaluation')",
+            name="ck_vision_run_type",
+        ),
+        sa.CheckConstraint(
+            "status IN ('running', 'completed', 'partial', 'failed', 'interrupted')",
+            name="ck_vision_run_status",
+        ),
+        sa.Index(
+            "uq_vision_single_running",
+            "status",
+            unique=True,
+            sqlite_where=sa.text("status = 'running'"),
+        ),
+    )
+
+
+class ImageEmbeddingRow(Base):
+    __tablename__ = "image_embeddings"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    listing_image_id: Mapped[int | None] = mapped_column(
+        sa.ForeignKey("listing_images.id"), index=True
+    )
+    reference_image_id: Mapped[int | None] = mapped_column(
+        sa.ForeignKey("reference_images.id"), index=True
+    )
+    owner_type: Mapped[str] = mapped_column(sa.String(16))
+    content_sha256: Mapped[str] = mapped_column(sa.String(64), index=True)
+    model_id: Mapped[str] = mapped_column(sa.String(255))
+    model_revision: Mapped[str] = mapped_column(sa.String(128))
+    model_fingerprint: Mapped[str] = mapped_column(sa.String(64), index=True)
+    preprocessing_version: Mapped[str] = mapped_column(sa.String(64))
+    embedding_dim: Mapped[int] = mapped_column(sa.Integer)
+    dtype: Mapped[str] = mapped_column(sa.String(16), default="float32")
+    vector_blob: Mapped[bytes] = mapped_column(sa.LargeBinary)
+    created_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
+
+    __table_args__ = (
+        sa.CheckConstraint("owner_type IN ('listing', 'reference')", name="ck_embedding_owner"),
+        sa.CheckConstraint("dtype = 'float32'", name="ck_embedding_dtype"),
+        sa.CheckConstraint("embedding_dim > 0", name="ck_embedding_dim"),
+        sa.CheckConstraint(
+            "(owner_type = 'listing' AND listing_image_id IS NOT NULL AND "
+            "reference_image_id IS NULL) OR "
+            "(owner_type = 'reference' AND reference_image_id IS NOT NULL AND "
+            "listing_image_id IS NULL)",
+            name="ck_embedding_exactly_one_owner",
+        ),
+        sa.Index(
+            "uq_embedding_listing_content_model",
+            "listing_image_id",
+            "content_sha256",
+            "model_fingerprint",
+            unique=True,
+            sqlite_where=sa.text("owner_type = 'listing'"),
+        ),
+        sa.Index(
+            "uq_embedding_reference_content_model",
+            "reference_image_id",
+            "content_sha256",
+            "model_fingerprint",
+            unique=True,
+            sqlite_where=sa.text("owner_type = 'reference'"),
+        ),
+    )
+
+
+class VisualMatchRow(Base):
+    __tablename__ = "visual_matches"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    listing_image_id: Mapped[int] = mapped_column(sa.ForeignKey("listing_images.id"), index=True)
+    part_id: Mapped[str] = mapped_column(sa.String, index=True)
+    model_fingerprint: Mapped[str] = mapped_column(sa.String(64), index=True)
+    best_positive_reference_id: Mapped[int | None] = mapped_column(
+        sa.ForeignKey("reference_images.id")
+    )
+    best_negative_reference_id: Mapped[int | None] = mapped_column(
+        sa.ForeignKey("reference_images.id")
+    )
+    positive_similarity: Mapped[float | None] = mapped_column(sa.Float)
+    negative_similarity: Mapped[float | None] = mapped_column(sa.Float)
+    similarity_margin: Mapped[float | None] = mapped_column(sa.Float)
+    positive_reference_count: Mapped[int] = mapped_column(sa.Integer)
+    negative_reference_count: Mapped[int] = mapped_column(sa.Integer)
+    rank_for_listing: Mapped[int] = mapped_column(sa.Integer)
+    status: Mapped[str] = mapped_column(sa.String(32), index=True)
+    computed_at: Mapped[datetime] = mapped_column(sa.DateTime(timezone=True))
+
+    __table_args__ = (
+        sa.CheckConstraint(
+            "status IN ('ranked', 'review_candidate', 'positive_only', 'insufficient_references')",
+            name="ck_visual_match_status",
+        ),
+        sa.CheckConstraint("rank_for_listing > 0", name="ck_visual_match_rank"),
+        sa.UniqueConstraint(
+            "listing_image_id",
+            "part_id",
+            "model_fingerprint",
+            name="uq_visual_match_image_part_model",
+        ),
+    )
